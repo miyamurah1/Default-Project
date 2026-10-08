@@ -38,13 +38,20 @@ class _RitualsHubScreenState extends State<RitualsHubScreen> {
       // Offstage skeleton placeholder (shimmer paused offscreen).
       return const TickerMode(enabled: false, child: TabSkeleton());
     }
+    // Fresh (non-const) instances every build so a theme swap repaints
+    // the section: a `const` page canonicalises to the identical widget
+    // instance, Flutter skips the child update and the old SakuraColors
+    // stay frozen — the same bug AppShell documents for its tab pages.
+    // State (stores, scroll offsets) survives — same type, same order.
     Widget page;
     switch (i) {
       case 0:
-        page = const HabitsScreen();
+        // ignore: prefer_const_constructors
+        page = HabitsScreen();
         break;
       default:
-        page = const GoalsScreen(embedded: true);
+        // ignore: prefer_const_constructors
+        page = GoalsScreen(embedded: true);
         break;
     }
     return TickerMode(enabled: i == _index, child: page);

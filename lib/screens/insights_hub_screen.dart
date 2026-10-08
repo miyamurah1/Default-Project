@@ -71,19 +71,28 @@ class _InsightsHubScreenState extends State<InsightsHubScreen> {
       // Offstage skeleton placeholder (shimmer paused offscreen).
       return const TickerMode(enabled: false, child: TabSkeleton());
     }
+    // Fresh (non-const) instances every build so a theme swap repaints
+    // the section: a `const` page canonicalises to the identical widget
+    // instance, Flutter skips the child update and the old SakuraColors
+    // stay frozen — the same bug AppShell documents for its tab pages.
+    // State (stores, scroll offsets) survives — same type, same order.
     Widget page;
     switch (i) {
       case 0:
-        page = const InsightsScreen(embedded: true);
+        // ignore: prefer_const_constructors
+        page = InsightsScreen(embedded: true);
         break;
       case 1:
-        page = const ReviewScreen(embedded: true);
+        // ignore: prefer_const_constructors
+        page = ReviewScreen(embedded: true);
         break;
       case 2:
-        page = const InboxScreen();
+        // ignore: prefer_const_constructors
+        page = InboxScreen();
         break;
       default:
-        page = const RulesScreen();
+        // ignore: prefer_const_constructors
+        page = RulesScreen();
         break;
     }
     return TickerMode(enabled: i == _index, child: page);

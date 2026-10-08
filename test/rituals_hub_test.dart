@@ -2,9 +2,13 @@
 // - the Rituals hub re-homes the previously orphaned Goals dashboard
 // - theme preview restores the real theme even across rapid previews
 import 'package:daily_bloom/data/inbox_store.dart';
+import 'package:daily_bloom/screens/app_shell.dart';
+import 'package:daily_bloom/screens/habits_screen.dart';
 import 'package:daily_bloom/screens/insights_hub_screen.dart';
+import 'package:daily_bloom/screens/insights_screen.dart';
 import 'package:daily_bloom/screens/rituals_hub_screen.dart';
 import 'package:daily_bloom/theme/sakura_theme.dart';
+import 'package:daily_bloom/widgets/sakura_bottom_nav.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -77,5 +81,82 @@ void main() {
         find.byWidgetPredicate((w) =>
             w is Semantics && (w.properties.label ?? '') == 'Inbox'),
         findsOneWidget);
+  });
+
+  // --- Theme swap ------------------------------------------------------
+  // The hubs cache visited sections in an IndexedStack. A const child
+  // canonicalises to the identical widget instance on rebuild, Flutter
+  // skips the child update and the section keeps painting the previous
+  // palette — the "theme won't apply" bug AppShell documents for its
+  // own tab pages, reproduced here on the inner hub screens.
+
+  Future<void> pumpShell(WidgetTester tester) async {
+    await tester.pumpWidget(
+      ListenableBuilder(
+        listenable: ThemeStore.instance,
+        builder: (_, __) => MaterialApp(
+          theme: SakuraTheme.buildTheme(),
+          home: const AppShell(),
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 1));
+  }
+
+  Future<void> tapNav(WidgetTester tester, String label) async {
+    await tester.tap(find.descendant(
+      of: find.byType(SakuraBottomNav),
+      matching: find.text(label),
+    ));
+    // Fixed pumps — pumpAndSettle never settles (ambient tickers).
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    await tester.pump(const Duration(milliseconds: 400));
+  }
+
+  /// Background of the Scaffold owned by [T] (first Scaffold in its
+  /// subtree — nested hubs add their own above the section's one).
+  Color bgOf<T extends Widget>(WidgetTester tester) => tester
+      .widget<Scaffold>(
+        find
+            .descendant(
+              of: find.byType(T),
+              matching: find.byType(Scaffold),
+            )
+            .first,
+      )
+      .backgroundColor!;
+
+  testWidgets('theme swap repaints the Insights hub section', (tester) async {
+    ThemeStore.instance.resetToDefault();
+    await pumpShell(tester);
+    await tapNav(tester, 'Insights');
+    expect(find.byType(InsightsScreen), findsOneWidget);
+    expect(bgOf<InsightsScreen>(tester), AppThemes.midnight.background);
+
+    await ThemeStore.instance.equip(() async {}, 'edo');
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+
+    expect(bgOf<InsightsScreen>(tester), AppThemes.byId('edo').background,
+        reason: 'the section must repaint on a theme swap');
+    ThemeStore.instance.resetToDefault();
+  });
+
+  testWidgets('theme swap repaints the Rituals hub section', (tester) async {
+    ThemeStore.instance.resetToDefault();
+    await pumpShell(tester);
+    await tapNav(tester, 'Rituals');
+    expect(find.byType(HabitsScreen), findsOneWidget);
+    expect(bgOf<HabitsScreen>(tester), AppThemes.midnight.background);
+
+    await ThemeStore.instance.equip(() async {}, 'edo');
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+
+    expect(bgOf<HabitsScreen>(tester), AppThemes.byId('edo').background,
+        reason: 'the section must repaint on a theme swap');
+    ThemeStore.instance.resetToDefault();
   });
 }
