@@ -425,7 +425,10 @@ class _HomeScreenState extends State<HomeScreen> {
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           Expanded(
-            flex: 3,
+            // 5:4 (was 3:2): the seedling cell needs ~140px on a 360px
+            // phone for rank/streak text beside the badge — at 3:2 its
+            // text column collapsed to ~48px and ellipsised every rank.
+            flex: 5,
             child: DailyIntentionCard(
               compact: true,
               onTargetMet: _claimBloom,
@@ -433,7 +436,7 @@ class _HomeScreenState extends State<HomeScreen> {
           ),
           const SizedBox(width: 10),
           Expanded(
-            flex: 2,
+            flex: 4,
             child: _GameHud(onBloom: _claimBloom),
           ),
         ],
@@ -772,14 +775,21 @@ class _GameHud extends StatelessWidget {
                       crossAxisAlignment: CrossAxisAlignment.start,
                       mainAxisSize: MainAxisSize.min,
                       children: [
-                        Text(
-                          '${game.rankName} · Lv ${game.level}',
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: TextStyle(
-                            fontSize: 12.5,
-                            fontWeight: FontWeight.w800,
-                            color: SakuraColors.ink),
+                        // Rank name only — the level digit already lives
+                        // in the badge core and the cell is too narrow
+                        // for 'Name · Lv N' on phones. FittedBox shrinks
+                        // the longest rank ('Sakura Bloom') instead of
+                        // ellipsising it.
+                        FittedBox(
+                          fit: BoxFit.scaleDown,
+                          child: Text(
+                            game.rankName,
+                            maxLines: 1,
+                            style: TextStyle(
+                                fontSize: 12.5,
+                                fontWeight: FontWeight.w800,
+                                color: SakuraColors.ink),
+                          ),
                         ),
                         const SizedBox(height: 2),
                         Row(

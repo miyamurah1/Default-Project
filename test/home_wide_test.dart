@@ -1,7 +1,10 @@
+import 'package:daily_bloom/game/game.dart';
 import 'package:daily_bloom/screens/home_screen.dart';
 import 'package:daily_bloom/widgets/contribution_heatmap.dart';
+import 'package:daily_bloom/widgets/daily_intention_card.dart';
 import 'package:daily_bloom/widgets/task_flow_list.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -97,5 +100,46 @@ void main() {
     final hud = tester.getSize(find.byKey(const ValueKey('home_hud_card')));
     expect(hudTopLeft.dx, 20);
     expect(hudTopLeft.dx + hud.width, 1400 - 20);
+  });
+
+  testWidgets('phone bento fills its cell (bar bottoms out, rank fits)',
+      (tester) async {
+    tester.view.physicalSize = const Size(360, 900);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(() {
+      tester.view.resetPhysicalSize();
+      tester.view.resetDevicePixelRatio();
+    });
+    await tester.pumpWidget(const MaterialApp(home: HomeScreen()));
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 2));
+    expect(tester.takeException(), isNull);
+
+    // The compact intention cell fills the 130px slot: the progress bar
+    // pins to the bottom instead of leaving a dead band below it.
+    final card = find.byType(DailyIntentionCard);
+    final bar = find.descendant(
+        of: card, matching: find.byType(LinearProgressIndicator));
+    final cardRect = tester.getRect(card);
+    final barRect = tester.getRect(bar);
+    expect(cardRect.bottom - barRect.bottom, lessThanOrEqualTo(20),
+        reason: 'progress bar hugs the card bottom');
+    expect(
+        barRect.top,
+        greaterThan(
+            tester.getTopLeft(find.text("Today's focus")).dy),
+        reason: 'bar stays under the headline');
+
+    // The rank line is never ellipsised: its paragraph measures as wide
+    // as the unwrapped text (FittedBox shrinks it instead of clipping).
+    final rank = GamificationStateNotifier.instance.rankName;
+    final para = tester.renderObject<RenderParagraph>(find.text(rank));
+    final natural = (TextPainter(
+      text: TextSpan(style: para.text.style, text: rank),
+      textDirection: TextDirection.ltr,
+    )..layout())
+        .width;
+    expect(para.size.width, greaterThanOrEqualTo(natural - 1),
+        reason: 'rank line must not be clipped at 360px');
   });
 }

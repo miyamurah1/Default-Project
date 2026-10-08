@@ -301,7 +301,12 @@ class _DailyIntentionCardState extends State<DailyIntentionCard> {
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
-        mainAxisSize: MainAxisSize.min,
+        // Fill the 130px bento cell: the headline block pins to the top
+        // and the bar + count row pins to the bottom. A min-size column
+        // left a dead band under the bar — the cell read half-empty
+        // beside the evenly-distributed GameHud on phones.
+        mainAxisSize: MainAxisSize.max,
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
         children: [
           Row(
             children: [
@@ -349,7 +354,31 @@ class _DailyIntentionCardState extends State<DailyIntentionCard> {
                   ],
                 ),
               ),
-              const SizedBox(width: 6),
+            ],
+          ),
+          // The count rides the bar row: the number sits beside the
+          // progress it describes, and the headline row keeps the full
+          // width for the target title on phones.
+          Row(
+            children: [
+              Expanded(
+                child: TweenAnimationBuilder<double>(
+                  tween: Tween<double>(begin: 0, end: _game.fraction),
+                  duration: AppMotion.progress,
+                  curve: AppMotion.progressCurve,
+                  builder: (context, v, _) => ClipRRect(
+                    borderRadius: BorderRadius.circular(3),
+                    child: LinearProgressIndicator(
+                      value: v,
+                      minHeight: 5,
+                      backgroundColor: SakuraColors.cardBorder,
+                      valueColor: AlwaysStoppedAnimation<Color>(
+                          SakuraColors.primary),
+                    ),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 8),
               Text(
                 '${_game.progress.clamp(0, 1 << 30)}/${_game.goal}',
                 style: TextStyle(
@@ -360,22 +389,6 @@ class _DailyIntentionCardState extends State<DailyIntentionCard> {
                 ),
               ),
             ],
-          ),
-          const SizedBox(height: 9),
-          TweenAnimationBuilder<double>(
-            tween: Tween<double>(begin: 0, end: _game.fraction),
-            duration: AppMotion.progress,
-            curve: AppMotion.progressCurve,
-            builder: (context, v, _) => ClipRRect(
-              borderRadius: BorderRadius.circular(3),
-              child: LinearProgressIndicator(
-                value: v,
-                minHeight: 5,
-                backgroundColor: SakuraColors.cardBorder,
-                valueColor:
-                    AlwaysStoppedAnimation<Color>(SakuraColors.primary),
-              ),
-            ),
           ),
         ],
       ),
