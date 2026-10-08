@@ -371,7 +371,7 @@ class _DailyIntentionCardState extends State<DailyIntentionCard> {
                     child: LinearProgressIndicator(
                       value: v,
                       minHeight: 5,
-                      backgroundColor: SakuraColors.cardBorder,
+                      backgroundColor: SakuraColors.primarySoft,
                       valueColor: AlwaysStoppedAnimation<Color>(
                           SakuraColors.primary),
                     ),
@@ -571,7 +571,7 @@ class _DailyIntentionCardState extends State<DailyIntentionCard> {
                     value: v,
                     minHeight: 6,
                     backgroundColor:
-                        SakuraColors.cardBorder,
+                        SakuraColors.primarySoft,
                     valueColor:
                         AlwaysStoppedAnimation<Color>(
                             SakuraColors.primary),

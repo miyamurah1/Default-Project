@@ -107,7 +107,7 @@ class _HabitsScreenState extends State<HabitsScreen> {
       child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
         Row(children: [Text('TODAY', style: TextStyle(fontSize: 10, letterSpacing: 2.2, fontWeight: FontWeight.w700, color: SakuraColors.inkFaint)), const Spacer(), Text('$done/$total', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w800, color: SakuraColors.ink, fontFeatures: const [FontFeature.tabularFigures()]))]),
         const SizedBox(height: 10),
-        TweenAnimationBuilder<double>(tween: Tween(begin: 0, end: p), duration: AppMotion.progress, curve: AppMotion.progressCurve, builder: (context, v, _) => ClipRRect(borderRadius: BorderRadius.circular(6), child: LinearProgressIndicator(value: total == 0 ? 0 : v, minHeight: 8, backgroundColor: SakuraColors.cardBorder, valueColor: AlwaysStoppedAnimation<Color>(SakuraColors.primary)))),
+        TweenAnimationBuilder<double>(tween: Tween(begin: 0, end: p), duration: AppMotion.progress, curve: AppMotion.progressCurve, builder: (context, v, _) => ClipRRect(borderRadius: BorderRadius.circular(6), child: LinearProgressIndicator(value: total == 0 ? 0 : v, minHeight: 8, backgroundColor: SakuraColors.primarySoft, valueColor: AlwaysStoppedAnimation<Color>(SakuraColors.primary)))),
         const SizedBox(height: 8),
         Text(label, style: TextStyle(fontSize: 12.5, height: 1.45, color: SakuraColors.inkSoft)),
       ]),
@@ -209,7 +209,7 @@ class _HabitsScreenState extends State<HabitsScreen> {
   }
   Widget _line({required int from, required int to, required int best}) {
     final frac = ((best - from) / (to - from)).clamp(0.0, 1.0);
-    return Expanded(child: Padding(padding: const EdgeInsets.only(bottom: 30, left: 4, right: 4), child: TweenAnimationBuilder<double>(tween: Tween(begin: 0, end: frac), duration: AppMotion.progress, curve: AppMotion.progressCurve, builder: (context, v, _) => ClipRRect(borderRadius: BorderRadius.circular(3), child: LinearProgressIndicator(value: v, minHeight: 4, backgroundColor: SakuraColors.cardBorder, valueColor: AlwaysStoppedAnimation<Color>(SakuraColors.primary.withValues(alpha: 0.85)))))));
+    return Expanded(child: Padding(padding: const EdgeInsets.only(bottom: 30, left: 4, right: 4), child: TweenAnimationBuilder<double>(tween: Tween(begin: 0, end: frac), duration: AppMotion.progress, curve: AppMotion.progressCurve, builder: (context, v, _) => ClipRRect(borderRadius: BorderRadius.circular(3), child: LinearProgressIndicator(value: v, minHeight: 4, backgroundColor: SakuraColors.primarySoft, valueColor: AlwaysStoppedAnimation<Color>(SakuraColors.primary.withValues(alpha: 0.85)))))));
   }
 }
 /// One goal section: header + its habits.
@@ -370,7 +370,7 @@ class HabitRow extends StatelessWidget {
               Row(children: [
                 _stepBtn(icon: LucideIcons.minus, onTap: () => store.logToday(habit.id, -1)),
                 const SizedBox(width: 8),
-                Expanded(child: TweenAnimationBuilder<double>(tween: Tween(begin: 0, end: frac), duration: AppMotion.progress, curve: AppMotion.progressCurve, builder: (context, v, _) => ClipRRect(borderRadius: BorderRadius.circular(5), child: LinearProgressIndicator(value: v, minHeight: 7, backgroundColor: SakuraColors.cardBorder, valueColor: AlwaysStoppedAnimation<Color>(done ? accent : SakuraColors.primary))))),
+                Expanded(child: TweenAnimationBuilder<double>(tween: Tween(begin: 0, end: frac), duration: AppMotion.progress, curve: AppMotion.progressCurve, builder: (context, v, _) => ClipRRect(borderRadius: BorderRadius.circular(5), child: LinearProgressIndicator(value: v, minHeight: 7, backgroundColor: SakuraColors.primarySoft, valueColor: AlwaysStoppedAnimation<Color>(done ? accent : SakuraColors.primary))))),
                 const SizedBox(width: 8),
                 _stepBtn(icon: LucideIcons.plus, primary: true, onTap: () => store.logToday(habit.id, 1)),
               ]),

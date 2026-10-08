@@ -825,7 +825,7 @@ class _GameHud extends StatelessWidget {
                 child: LinearProgressIndicator(
                   value: game.levelProgress,
                   minHeight: 6,
-                  backgroundColor: SakuraColors.cardBorder,
+                  backgroundColor: SakuraColors.primarySoft,
                   valueColor:
                       AlwaysStoppedAnimation<Color>(SakuraColors.primary),
                 ),

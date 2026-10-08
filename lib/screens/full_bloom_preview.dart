@@ -194,7 +194,7 @@ class _FullBloomPreviewState extends State<FullBloomPreview> {
                                   value: progress,
                                   minHeight: 7,
                                   backgroundColor: SakuraColors
-                                      .cardBorder,
+                                      .primarySoft,
                                   valueColor:
                                       const AlwaysStoppedAnimation<
                                               Color>(
