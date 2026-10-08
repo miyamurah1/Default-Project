@@ -1,0 +1,19 @@
+# Render Blueprint — lets you deploy the API by pointing Render at this repo.
+# Paste in DATABASE_URL (Neon/Supabase) + FIREBASE_SERVICE_ACCOUNT
+# (Firebase Console → Project Settings → Service accounts → Generate key,
+# pasted as a single line). Auth fails without the service account.
+services:
+  - type: web
+    name: daily-bloom-api
+    runtime: node
+    rootDir: server
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: DATABASE_URL
+        sync: false
+      # Firebase Admin SDK service-account JSON (single line).
+      # Paste from Firebase Console → Project Settings → Service accounts.
+      - key: FIREBASE_SERVICE_ACCOUNT
+        sync: false

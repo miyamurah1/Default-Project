@@ -1,0 +1,13 @@
+# Release signing for Daily Bloom (Play Store uploads).
+#
+# 1. Generate the keystore ONCE (back it up in two places — losing it
+#    means you can never update the app again):
+#      keytool -genkeypair -v -keystore %USERPROFILE%\upload-keystore.jks ^
+#        -keyalg RSA -keysize 2048 -validity 10000 -alias upload
+# 2. Copy this file to android/key.properties (no .example) and fill in
+#    YOUR passwords. key.properties is git-ignored and must never be
+#    committed or shared.
+storePassword=REPLACE_WITH_STORE_PASSWORD
+keyPassword=REPLACE_WITH_KEY_PASSWORD
+keyAlias=upload
+storeFile=../upload-keystore.jks

@@ -1,0 +1,364 @@
+import 'dart:convert';
+
+import 'package:firebase_auth/firebase_auth.dart';
+import 'package:flutter/foundation.dart';
+import 'package:google_sign_in/google_sign_in.dart';
+import 'package:http/http.dart' as http;
+import 'package:shared_preferences/shared_preferences.dart';
+
+/// Logged-in user profile (mirrors the backend's `publicUser()` shape).
+class AuthUser {
+  final String id;
+  final String email;
+  final String displayName;
+  final String avatarLabel;
+  final String activeTheme;
+
+  const AuthUser({
+    required this.id,
+    required this.email,
+    this.displayName = '',
+    this.avatarLabel = '禅',
+    this.activeTheme = 'midnight',
+  });
+
+  factory AuthUser.fromJson(Map<String, dynamic> j) => AuthUser(
+        id: '${j['id']}',
+        email: '${j['email']}',
+        displayName: '${j['display_name'] ?? ''}',
+        avatarLabel: '${j['avatar_label'] ?? '禅'}',
+        activeTheme: '${j['active_theme'] ?? 'midnight'}',
+      );
+
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'email': email,
+        'display_name': displayName,
+        'avatar_label': avatarLabel,
+        'active_theme': activeTheme,
+      };
+}
+
+/// Thrown when the Firebase session is bad/expired.
+class AuthExpiredException implements Exception {
+  final String message;
+  const AuthExpiredException([this.message = 'session expired']);
+  @override
+  String toString() => message;
+}
+
+/// Thrown for expected auth failures (wrong password, email taken, ...).
+class AuthException implements Exception {
+  final String message;
+  const AuthException(this.message);
+  @override
+  String toString() => message;
+}
+
+/// Single source of truth for login state.
+///
+/// - Uses Firebase Auth as the identity provider (email/password + Google).
+/// - On every Firebase sign-in, calls the backend to upsert the DB user row.
+/// - [BloomApi] calls [getIdToken] to get a fresh Firebase ID token for the
+///   `Authorization: Bearer …` header — Firebase rotates it automatically.
+/// - [AuthGate] listens to [FirebaseAuth.instance.authStateChanges()] which
+///   is re-emitted here via [ChangeNotifier].
+class AuthStore extends ChangeNotifier {
+  static const _kUser = 'bloom_user_v2'; // new key to avoid stale JWT data
+
+  static const String baseUrl = String.fromEnvironment(
+    'BLOOM_API',
+    defaultValue: 'http://localhost:8080',
+  );
+
+  AuthStore._();
+  static final AuthStore instance = AuthStore._();
+
+  AuthUser? _user;
+  bool _ready = false;
+
+  AuthUser? get user => _user;
+  bool get isLoggedIn => FirebaseAuth.instance.currentUser != null && _user != null;
+  bool get isReady => _ready;
+
+  static final _emailRe = RegExp(r'^[^\s@]+@[^\s@]+\.[^\s@]+$');
+
+  static String? validateEmail(String v) {
+    if (v.trim().isEmpty) return 'Email is required';
+    if (!_emailRe.hasMatch(v.trim())) return 'Enter a valid email address';
+    return null;
+  }
+
+  static String? validatePassword(String v, {bool isSignup = false}) {
+    if (v.isEmpty) return 'Password is required';
+    if (isSignup && v.length < 8) return 'Use at least 8 characters';
+    return null;
+  }
+
+  /// Get a fresh Firebase ID token to attach to API requests.
+  /// Firebase auto-refreshes it when it expires (<1 hour lifetime).
+  Future<String?> getIdToken() async {
+    try {
+      return await FirebaseAuth.instance.currentUser?.getIdToken();
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Auth headers for [BloomApi] — uses a fresh Firebase ID token.
+  Future<Map<String, String>> get authHeaders async {
+    final token = await getIdToken();
+    return {
+      'Content-Type': 'application/json',
+      if (token != null) 'Authorization': 'Bearer $token',
+    };
+  }
+
+  /// Called once at startup: restore cached profile and listen for Firebase
+  /// auth state changes. Firebase handles token validation and refresh.
+  Future<void> restore() async {
+    try {
+      // Load cached profile for instant UI paint before network.
+      final prefs = await SharedPreferences.getInstance();
+      final rawUser = prefs.getString(_kUser);
+      if (rawUser != null) {
+        try {
+          _user = AuthUser.fromJson(jsonDecode(rawUser) as Map<String, dynamic>);
+        } catch (_) {
+          _user = null;
+        }
+      }
+
+      // Listen to Firebase auth state — fires immediately with current user.
+      FirebaseAuth.instance.authStateChanges().listen((firebaseUser) async {
+        if (firebaseUser == null) {
+          _user = null;
+          await _clearPersisted();
+          _ready = true;
+          notifyListeners();
+        } else {
+          // Sync profile from the backend (upserts DB row with Firebase UID).
+          try {
+            _user = await _syncProfile(firebaseUser);
+            await _persistUser();
+          } catch (_) {
+            // Use cached profile if network is unavailable.
+          }
+          _ready = true;
+          notifyListeners();
+        }
+      });
+    } catch (_) {
+      _user = null;
+      _ready = true;
+      notifyListeners();
+    }
+  }
+
+  /// Sign in with email + password via Firebase Auth.
+  Future<void> login({required String email, required String password}) async {
+    try {
+      await FirebaseAuth.instance.signInWithEmailAndPassword(
+        email: email.trim(),
+        password: password,
+      );
+      // authStateChanges() listener above handles _user sync + notifyListeners.
+    } on FirebaseAuthException catch (e) {
+      throw AuthException(_firebaseMsg(e));
+    } catch (_) {
+      throw const AuthException('Could not sign in — try again');
+    }
+  }
+
+  /// Sign up with email + password via Firebase Auth, then create a DB row.
+  /// Signs the new account in immediately: [_user] is set, persisted, and
+  /// listeners (AuthGate) are notified, so the app opens without a second
+  /// login. The authStateChanges listener below may re-sync afterwards —
+  /// that is harmless.
+  Future<AuthUser> signup({
+    required String email,
+    required String password,
+    String name = '',
+  }) async {
+    try {
+      final cred = await FirebaseAuth.instance.createUserWithEmailAndPassword(
+        email: email.trim(),
+        password: password,
+      );
+      // Update the Firebase display name immediately.
+      if (name.isNotEmpty) {
+        await cred.user?.updateDisplayName(name.trim());
+      }
+      // Sync with backend to upsert the DB user row. If the backend is
+      // unreachable the Firebase account still exists, so fall back to a
+      // minimal profile rather than stranding the user logged-out.
+      AuthUser user;
+      try {
+        user = await _syncProfile(cred.user!);
+      } catch (_) {
+        user = AuthUser(
+          id: cred.user!.uid,
+          email: cred.user!.email ?? email.trim(),
+          displayName: name.trim(),
+        );
+      }
+      _user = user;
+      _ready = true;
+      await _persistUser();
+      notifyListeners();
+      return user;
+    } on FirebaseAuthException catch (e) {
+      throw AuthException(_firebaseMsg(e));
+    } on AuthException {
+      rethrow;
+    } catch (_) {
+      throw const AuthException('Could not create account — try again');
+    }
+  }
+
+  /// Sign in with Google via Firebase Auth.
+  Future<void> signInWithGoogle() async {
+    try {
+      if (kIsWeb) {
+        // Web: use Firebase popup flow.
+        final provider = GoogleAuthProvider();
+        await FirebaseAuth.instance.signInWithPopup(provider);
+      } else {
+        // Mobile: use google_sign_in package.
+        final googleUser = await GoogleSignIn().signIn();
+        if (googleUser == null) return; // User cancelled.
+        final googleAuth = await googleUser.authentication;
+        final credential = GoogleAuthProvider.credential(
+          accessToken: googleAuth.accessToken,
+          idToken: googleAuth.idToken,
+        );
+        await FirebaseAuth.instance.signInWithCredential(credential);
+      }
+      // authStateChanges() listener handles _user sync + notifyListeners.
+    } on FirebaseAuthException catch (e) {
+      throw AuthException(_firebaseMsg(e));
+    } catch (_) {
+      throw const AuthException('Google sign-in failed — try again');
+    }
+  }
+
+  /// Send a password-reset email via Firebase (no custom code needed).
+  Future<void> sendPasswordReset(String email) async {
+    try {
+      await FirebaseAuth.instance.sendPasswordResetEmail(email: email.trim());
+    } on FirebaseAuthException catch (e) {
+      throw AuthException(_firebaseMsg(e));
+    } catch (_) {
+      throw const AuthException('Could not send reset email — try again');
+    }
+  }
+
+  /// Delete the Firebase account + backend data (Play Store requirement).
+  Future<void> deleteAccount() async {
+    final firebaseUser = FirebaseAuth.instance.currentUser;
+    if (firebaseUser == null) throw const AuthExpiredException();
+    try {
+      // Delete backend data first.
+      final headers = await authHeaders;
+      final res = await http
+          .delete(Uri.parse('$baseUrl/api/auth/account'), headers: headers)
+          .timeout(const Duration(seconds: 15));
+      if (res.statusCode == 401) throw const AuthExpiredException();
+      if (res.statusCode != 200) {
+        throw AuthException(_msg(res.body, 'Could not delete account — try again'));
+      }
+      // Then delete the Firebase identity.
+      await firebaseUser.delete();
+    } on FirebaseAuthException catch (e) {
+      // Re-authentication required for sensitive operations.
+      throw AuthException(_firebaseMsg(e));
+    }
+  }
+
+  Future<void> logout() async {
+    // Best-effort first: GoogleSignIn is unconfigured on web (no
+    // google-signin-client_id meta tag), where even instantiating it
+    // throws — Firebase sign-out below must still run, or logout
+    // silently strands the user logged in.
+    try {
+      await GoogleSignIn().signOut();
+    } catch (_) {}
+    await FirebaseAuth.instance.signOut();
+    // authStateChanges() listener sets _user = null + notifies.
+  }
+
+  // ── Private helpers ─────────────────────────────────────────────────────
+
+  /// Calls POST /api/auth/firebase-sync to upsert the DB row for this
+  /// Firebase user. Returns the enriched [AuthUser] from the backend.
+  Future<AuthUser> _syncProfile(User firebaseUser) async {
+    final token = await firebaseUser.getIdToken();
+    final res = await http
+        .post(
+          Uri.parse('$baseUrl/api/auth/firebase-sync'),
+          headers: {'Content-Type': 'application/json', 'Authorization': 'Bearer $token'},
+          body: jsonEncode({
+            'display_name': firebaseUser.displayName ?? '',
+            'email': firebaseUser.email ?? '',
+          }),
+        )
+        .timeout(const Duration(seconds: 15));
+    if (res.statusCode == 200 || res.statusCode == 201) {
+      final j = jsonDecode(res.body) as Map<String, dynamic>;
+      return AuthUser.fromJson(j['user'] as Map<String, dynamic>);
+    }
+    // Fallback: build a minimal AuthUser from Firebase data if backend is down.
+    return AuthUser(
+      id: firebaseUser.uid,
+      email: firebaseUser.email ?? '',
+      displayName: firebaseUser.displayName ?? '',
+    );
+  }
+
+  Future<void> _persistUser() async {
+    final prefs = await SharedPreferences.getInstance();
+    if (_user != null) {
+      await prefs.setString(_kUser, jsonEncode(_user!.toJson()));
+    } else {
+      await prefs.remove(_kUser);
+    }
+  }
+
+  Future<void> _clearPersisted() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove(_kUser);
+  }
+
+  static String _firebaseMsg(FirebaseAuthException e) {
+    switch (e.code) {
+      case 'user-not-found':
+      case 'wrong-password':
+      case 'invalid-credential':
+        return 'Wrong email or password';
+      case 'email-already-in-use':
+        return 'An account with this email already exists';
+      case 'weak-password':
+        return 'Password must be at least 6 characters';
+      case 'invalid-email':
+        return 'Enter a valid email address';
+      case 'user-disabled':
+        return 'This account has been disabled';
+      case 'too-many-requests':
+        return 'Too many attempts — wait a moment and try again';
+      case 'requires-recent-login':
+        return 'For safety, sign in again first, then retry this';
+      case 'account-exists-with-different-credential':
+        return 'An account already exists with a different sign-in method';
+      default:
+        return e.message ?? 'Authentication failed — try again';
+    }
+  }
+
+  static String _msg(String body, String fallback) {
+    try {
+      final j = jsonDecode(body);
+      if (j is Map && j['error'] is String) return j['error'] as String;
+    } catch (_) {}
+    return fallback;
+  }
+}

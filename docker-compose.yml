@@ -1,0 +1,18 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: daily_bloom_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: bloom
+      POSTGRES_PASSWORD: bloom_dev_password
+      POSTGRES_DB: daily_bloom
+    ports:
+      - "5433:5432"
+    volumes:
+      - bloom_pgdata:/var/lib/postgresql/data
+      - ./db/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+      - ./db/seed.sql:/docker-entrypoint-initdb.d/02-seed.sql:ro
+
+volumes:
+  bloom_pgdata:
