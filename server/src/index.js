@@ -8,20 +8,39 @@ import { getAuth } from 'firebase-admin/auth';
 
 // ── Firebase Admin initialisation (modular SDK — no default-import
 // interop quirks) ─────────────────────────────────────────────────────────
-// Set GOOGLE_APPLICATION_CREDENTIALS env var to the path of your service
-// account JSON, OR set FIREBASE_SERVICE_ACCOUNT to the JSON string itself
-// (useful for Render/Railway secrets). Falls back to Application Default
-// Credentials (works automatically on Google Cloud / Cloud Run).
+// Credential sources, in order:
+//  1. FIREBASE_SERVICE_ACCOUNT — the JSON itself (Render/Railway secrets).
+//  2. GOOGLE_APPLICATION_CREDENTIALS — path to the service-account file
+//     (local .env: ./firebase-service-account.json).
+//  3. Application Default Credentials (Google Cloud / Cloud Run).
+// Without one of these, verifyIdToken() rejects every token and the app
+// sits in offline mode with firebase-sync 401s — Firebase login itself
+// still succeeds, which is exactly the confusing split in the web log.
 let firebaseReady = false;
+let firebaseCredentialSource = 'application-default';
 try {
-  const sa = process.env.FIREBASE_SERVICE_ACCOUNT;
-  initializeApp({
-    credential: sa
-      ? cert(JSON.parse(sa))
-      : applicationDefault(),
-  });
+  const saJson = process.env.FIREBASE_SERVICE_ACCOUNT;
+  const saPath = process.env.GOOGLE_APPLICATION_CREDENTIALS;
+  let credential = null;
+  if (saJson) {
+    credential = cert(JSON.parse(saJson));
+    firebaseCredentialSource = 'env-json';
+  } else if (saPath) {
+    const { readFileSync } = await import('node:fs');
+    const { resolve, isAbsolute, dirname } = await import('node:path');
+    const { fileURLToPath } = await import('node:url');
+    const here = dirname(fileURLToPath(import.meta.url));
+    const abs = isAbsolute(saPath) ? saPath : resolve(here, '..', saPath);
+    credential = cert(JSON.parse(readFileSync(abs, 'utf8')));
+    firebaseCredentialSource = 'file:' + abs;
+  } else {
+    credential = applicationDefault();
+  }
+  initializeApp({ credential });
   firebaseReady = true;
-  console.log('[firebase] Admin SDK initialised');
+  console.log(
+    '[firebase] Admin SDK initialised via ' + firebaseCredentialSource,
+  );
 } catch (e) {
   console.error('[firebase] Admin SDK init failed — auth will not work:', e?.message ?? e);
 }
@@ -200,7 +219,11 @@ function streakStats(dayCounts, windowDays) {
 app.get('/health', async (req, res) => {
   try {
     await pool.query('SELECT 1');
-    res.json({ ok: true });
+    res.json({
+      ok: true,
+      firebaseReady,
+      firebaseCredentialSource,
+    });
   } catch (e) {
     res.status(500).json({ ok: false, error: String(e) });
   }

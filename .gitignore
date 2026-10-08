@@ -48,6 +48,8 @@ app.*.map.json
 server/node_modules/
 server/.env
 server/firebase-service-account.json
+server/*.log
+server/*.err
 
 # Firebase credentials — NEVER commit these
 google-services.json
