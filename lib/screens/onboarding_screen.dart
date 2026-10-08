@@ -94,8 +94,12 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
                 ],
               ),
             ),
-            Row(
-              mainAxisAlignment: MainAxisAlignment.center,
+            // Dots: Wrap, not Row — at 1.3x text scale with a narrow
+            // viewport the 3 pills + margins exceed the line width and a
+            // Row throws a 60px RenderFlex overflow (web log).
+            Wrap(
+              alignment: WrapAlignment.center,
+              runSpacing: 8,
               children: List.generate(3, (i) {
                 final active = i == _page;
                 return AnimatedContainer(
