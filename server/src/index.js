@@ -60,6 +60,7 @@ const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
 });
 
+
 const app = express();
 // Web origins are allow-listed via CORS_ORIGIN (comma-separated). Native
 // apps, curl, and Postman send no Origin and always pass; browsers pass
@@ -78,6 +79,11 @@ app.use(cors({
   },
   credentials: true,
 }));
+
+// Request body parsing (required for POST/PATCH route handlers)
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+
 
 // Optional crash reporting (Sentry). No SENTRY_DSN = zero behavior
 // change: nothing is imported, nothing leaves the server.

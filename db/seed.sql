@@ -44,7 +44,10 @@ WHERE NOT EXISTS (SELECT 1 FROM contributions)
 ON CONFLICT DO NOTHING;
 
 -- Make today + yesterday pop like the gold peak in the design.
+-- The contributions table has no user_id column (line 20 of schema.sql),
+-- so drop this bogus predicate. (Found while validating deploy: a fresh
+-- db's `migrate` crashed here with SQLSTATE 42703, blocking boot.)
 DELETE FROM contributions
-WHERE day IN (CURRENT_DATE, CURRENT_DATE - 1) AND user_id IS NULL;
+WHERE day IN (CURRENT_DATE, CURRENT_DATE - 1);
 INSERT INTO contributions (day, count) VALUES (CURRENT_DATE, 5), (CURRENT_DATE - 1, 4)
 ON CONFLICT DO NOTHING;

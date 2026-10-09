@@ -1,5 +1,5 @@
 // Tasks, subtasks, notes, timeline, search, export, reorder.
-// Moved verbatim from src/index.js (route split). No logic changes.
+import { publicUser } from './lib/auth.js';
 
 export function registerTaskRoutes(app, { pool, requireAuth, logEvent, runRules }) {
 // --- Existing app routes (now require a valid Bearer token) ---
@@ -421,7 +421,7 @@ app.get('/api/export', requireAuth, async (req, res) => {
       inbox: inbox.rows,
       focus_sessions: focus.rows,
     });
-  } catch {
+  } catch (err) {
     res.status(500).json({ error: 'could not export data' });
   }
 });

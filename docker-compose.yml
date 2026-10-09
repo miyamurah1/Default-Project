@@ -5,7 +5,9 @@ services:
     restart: unless-stopped
     environment:
       POSTGRES_USER: bloom
-      POSTGRES_PASSWORD: bloom_dev_password
+      # Aligned with CI ci.yml's POSTGRES_PASSWORD so `docker compose up`
+      # + `npm test` reproduces the CI database locally exactly.
+      POSTGRES_PASSWORD: bloom_ci_password
       POSTGRES_DB: daily_bloom
     ports:
       - "5433:5432"

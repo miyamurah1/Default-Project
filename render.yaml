@@ -1,13 +1,15 @@
 # Render Blueprint — lets you deploy the API by pointing Render at this repo.
-# Paste in DATABASE_URL (Neon/Supabase) + FIREBASE_SERVICE_ACCOUNT
-# (Firebase Console → Project Settings → Service accounts → Generate key,
-# pasted as a single line). Auth fails without the service account.
+# `sync: false` means Render prompts you for each value once in its dashboard,
+# then keeps it secret. The app runs with sane fallbacks if any are left blank:
+# no DB → health reports not-ok; no AI keys → local-heuristic mode ($0, still
+# works); no Sentry → crash reporting off.
 services:
   - type: web
     name: daily-bloom-api
     runtime: node
     rootDir: server
     buildCommand: npm install
+    # `npm start` runs migrations first (scripts/migrate.js), then boots.
     startCommand: npm start
     healthCheckPath: /health
     envVars:
@@ -15,5 +17,24 @@ services:
         sync: false
       # Firebase Admin SDK service-account JSON (single line).
       # Paste from Firebase Console → Project Settings → Service accounts.
+      # Auth (/api/auth/firebase-sync) fails without it.
       - key: FIREBASE_SERVICE_ACCOUNT
+        sync: false
+      # AI proxy — Gemini 2.5 Flash-Lite primary, Groq fallback.
+      # Both free-tier. Leave blank for $0 local-heuristic mode (still works).
+      # Gemini: https://aistudio.google.com/apikey
+      - key: GEMINI_API_KEY
+        sync: false
+      # Groq (OpenAI-compatible): https://console.groq.com
+      - key: GROQ_API_KEY
+        sync: false
+      # Max AI calls per user per day; over cap degrades to heuristics (no 429).
+      - key: AI_DAILY_CAP
+        value: '50'
+      # Web origins allowed by CORS in production (comma-separated).
+      # Native apps send no Origin and always pass. Set to your deployed web URL.
+      - key: CORS_ORIGIN
+        sync: false
+      # Crash reporting. Empty = disabled; nothing leaves the server.
+      - key: SENTRY_DSN
         sync: false
