@@ -65,6 +65,14 @@ void main() {
     expect(answer.text, contains('1 match'));
   });
 
+  test('non-Latin input is flagged as unsupported for AI', () {
+    expect(isAiSupportedScript('Report tomorrow 5pm'), isTrue);
+    expect(isAiSupportedScript(''), isTrue);
+    expect(isAiSupportedScript('ಕಲ ರಿಪೋರ್ಟ್'), isFalse);
+    expect(isAiSupportedScript('明日の会議の準備'), isFalse);
+    expect(isAiSupportedScript('تقرير غدا'), isFalse);
+  });
+
   test('load bar totals open subtasks, else one block', () {
     const t = Task(id: 'a', title: 'Big', tag: 'G');
     expect(estimatedMinutes(t), 25);

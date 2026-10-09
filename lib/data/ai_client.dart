@@ -2,10 +2,24 @@ import 'dart:convert';
 
 import 'package:http/http.dart' as http;
 
-import '../data/energy_store.dart';
 import 'api_client.dart';
 import 'auth_store.dart';
+import '../data/energy_store.dart';
 import 'mock_data.dart';
+
+/// True when text is mostly Latin-script / ASCII — the only script the
+/// LLM + heuristics handle well today. Anything else (Hindi, Arabic,
+/// Japanese…) skips the AI call entirely, returning 0 or receiving a
+/// neutral prompt untouched.
+bool isAiSupportedScript(String text) {
+  final t = text.trim();
+  if (t.isEmpty) return true;
+  var latin = 0;
+  for (final u in t.runes) {
+    if (u <= 0x7F) latin++;
+  }
+  return latin / t.runes.length >= 0.65;
+}
 
 /// AI client — Gemini 2.5 Flash-Lite via the server proxy, Groq fallback
 /// server-side, local heuristics when offline or uncapped.
@@ -413,6 +427,8 @@ class AiClient {
 
   Future<AiParse> parse(String text) async {
     final fallback = parseQuickAddLocal(text);
+    // Non-Latin input: skip AI entirely (it would mangle the title).
+    if (!isAiSupportedScript(text)) return fallback;
     try {
       final res = await _client
           .post(
@@ -433,6 +449,7 @@ class AiClient {
 
   Future<List<AiStep>> breakdown(String title) async {
     final fallback = breakdownLocal(title);
+    if (!isAiSupportedScript(title)) return fallback;
     try {
       final res = await _client
           .post(
@@ -462,8 +479,7 @@ class AiClient {
 
   Future<List<AiPick>> plan(List<Task> tasks) async {
     final fallback = planDayLocal(tasks);
-    try {
-      final res = await _client
+    try {      final res = await _client
           .post(
             Uri.parse('${BloomApi.baseUrl}/api/ai/plan'),
             headers: await _headers,
@@ -571,6 +587,7 @@ class AiClient {
 
   Future<AiAnswer> ask(String question, List<Task> tasks) async {
     final fallback = askLocal(question, tasks);
+    if (!isAiSupportedScript(question)) return fallback;
     try {
       final res = await _client
           .post(

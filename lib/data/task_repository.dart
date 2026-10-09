@@ -188,6 +188,24 @@ class TaskRepository extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// Re-queue parked mutations so the next sync replays them. Used by
+  /// the Settings "sync issues" row: a fix on the server (or a login)
+  /// makes a previously-fatal mutation valid again.
+  Future<void> retryDeadLetters() async {
+    if (_deadLetters.isEmpty) return;
+    final revived = _deadLetters.map((m) {
+      final copy = Map<String, dynamic>.from(m);
+      copy['attempts'] = 0;
+      return copy;
+    }).toList();
+    _deadLetters.clear();
+    await _saveDeadLetters();
+    for (final m in revived) {
+      await _enqueue(m);
+    }
+    await syncNow();
+  }
+
   /// Replays every queued mutation in FIFO order.
   ///
   /// - A network/transient failure stops the drain and keeps the tail so

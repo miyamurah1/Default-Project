@@ -16,8 +16,16 @@ import '../data/mock_data.dart';
 import '../data/reminders.dart';
 import '../data/task_repository.dart';
 import '../game/game.dart';
+
 import '../theme/sakura_theme.dart';
+
+
 import '../widgets/bloom_dialog.dart';
+
+String _taskIdentityKey(Task t) =>
+    '${t.title.trim().toLowerCase()}|${t.folder.trim().toLowerCase()}|${t.tag.trim().toLowerCase()}|${t.dueAt?.toIso8601String() ?? ''}';
+
+
 /// Settings — profile, logout, and the Play-required account deletion.
 class SettingsScreen extends StatefulWidget {
   const SettingsScreen({super.key});
@@ -34,6 +42,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
   bool _reminderOn = false;
   bool _reminderBusy = false;
   bool _crashOn = true;
+
+  /// Sync issues: pending + dead-letter counts for the Settings row.
+  int _pending = 0;
+  int _dead = 0;
 
   @override
   void initState() {
@@ -120,7 +132,117 @@ class _SettingsScreenState extends State<SettingsScreen> {
     }
   }
 
-  Future<void> _exportBackup() async {    setState(() => _backupBusy = true);
+  /// Sync issues row: visible only when something is queued or parked.
+  /// Queued items flush automatically on reconnect (already reported by
+  /// Home's pill); dead letters need a human — they were rejected 5x,
+  /// so Retry + Discard are offered explicitly.
+  Widget _syncIssueRow() {
+    final repo = TaskRepository.instance;
+    return ListenableBuilder(
+      listenable: repo,
+      builder: (context, _) {
+        _pending = repo.pendingMutations;
+        _dead = repo.deadLetterCount;
+        if (_pending == 0 && _dead == 0) return const SizedBox.shrink();
+        final parts = <String>[
+          if (_pending > 0) '$_pending waiting to sync',
+          if (_dead > 0) '$_dead could not sync',
+        ];
+        return Padding(
+          padding: const EdgeInsets.only(top: 14),
+          child: Container(
+            padding: const EdgeInsets.all(14),
+            decoration: BoxDecoration(
+              color: _dead > 0
+                  ? SakuraColors.primary.withValues(alpha: 0.07)
+                  : SakuraColors.background,
+              borderRadius: BorderRadius.circular(14),
+              border:
+                  Border.all(color: SakuraColors.cardBorder),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Icon(
+                      _dead > 0
+                          ? LucideIcons.triangleAlert
+                          : LucideIcons.refreshCw,
+                      size: 14,
+                      color: SakuraColors.primary,
+                    ),
+                    const SizedBox(width: 7),
+                    Expanded(
+                      child: Text(
+                        parts.join(' · '),
+                        style: TextStyle(
+                          fontSize: 12.5,
+                          fontWeight: FontWeight.w600,
+                          color: SakuraColors.ink,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+                if (_dead > 0) ...[
+                  const SizedBox(height: 4),
+                  Text(
+                    'These changes were rejected. Retry once the server is healthy.',
+                    style: TextStyle(
+                        fontSize: 11.5,
+                        height: 1.4,
+                        color: SakuraColors.inkSoft),
+                  ),
+                  const SizedBox(height: 10),
+                  Row(
+                    children: [
+                      OutlinedButton(
+                        style: OutlinedButton.styleFrom(
+                          foregroundColor: SakuraColors.primary,
+                          side: BorderSide(
+                              color: SakuraColors.primary),
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 14, vertical: 8),
+                        ),
+                        onPressed: () async {
+                          await repo.retryDeadLetters();
+                        },
+                        child: const Text('Retry',
+                            style: TextStyle(
+                                fontSize: 12.5,
+                                fontWeight: FontWeight.w700)),
+                      ),
+                      const SizedBox(width: 8),
+                      OutlinedButton(
+                        style: OutlinedButton.styleFrom(
+                          foregroundColor: SakuraColors.inkSoft,
+                          side: BorderSide(
+                              color: SakuraColors.cardBorder),
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 14, vertical: 8),
+                        ),
+                        onPressed: () async {
+                          await repo.discardDeadLetters();
+                        },
+                        child: const Text('Discard',
+                            style: TextStyle(
+                                fontSize: 12.5,
+                                fontWeight: FontWeight.w700)),
+                      ),
+                    ],
+                  ),
+                ],
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  Future<void> _exportBackup() async {
+    setState(() => _backupBusy = true);
     try {
       final game = GamificationStateNotifier.instance;
       final backup = {
@@ -171,8 +293,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   /// Import a backup: paste JSON (exported above) into the dialog, confirm,
   /// then merge. Existing ids are skipped (no duplicates); game stats only
   /// ever move up, never down.
-  Future<void> _importBackup() async {
-    final pasted = await showDialog<String>(
+  Future<void> _importBackup() async {    final pasted = await showDialog<String>(
       context: context,
       builder: (ctx) {
         final ctrl = TextEditingController();
@@ -235,7 +356,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
       var habitsAdded = 0;
       var habitsSkipped = 0;
       final repo = TaskRepository.instance;
-      final existingTasks = repo.tasks.map((t) => t.id).toSet();
+      // Dedupe by id AND by identity: `createTask` mints a fresh id for
+      // every restore, so an id-only check let the SAME import run twice
+      // silently duplicate every task. Identity (title + folder + tag +
+      // due) is the stable key a backup carries across devices.
+      final existingIds = repo.tasks.map((t) => t.id).toSet();
+      final existingKeys = repo.tasks.map(_taskIdentityKey).toSet();
       final rawTasks = backup['tasks'];
       if (rawTasks is List) {
         for (final raw in rawTasks) {
@@ -246,10 +372,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
           } catch (_) {
             continue;
           }
-          if (task.id.isEmpty || existingTasks.contains(task.id)) {
+          if (task.id.isEmpty ||
+              existingIds.contains(task.id) ||
+              existingKeys.contains(_taskIdentityKey(task))) {
             tasksSkipped++;
             continue;
           }
+          existingKeys.add(_taskIdentityKey(task));
           final created = await repo.createTask(
             title: task.title,
             folder: task.folder,
@@ -631,6 +760,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                       style: TextStyle(
                           fontWeight: FontWeight.w700)),
                 ),
+                _syncIssueRow(),
               ],
             ),
           ),

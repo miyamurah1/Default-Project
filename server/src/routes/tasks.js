@@ -1,5 +1,5 @@
 // Tasks, subtasks, notes, timeline, search, export, reorder.
-import { publicUser } from './lib/auth.js';
+import { publicUser } from '../lib/auth.js';
 
 export function registerTaskRoutes(app, { pool, requireAuth, logEvent, runRules }) {
 // --- Existing app routes (now require a valid Bearer token) ---

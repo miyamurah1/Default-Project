@@ -23,7 +23,7 @@ void main() async {
 
   // Mindful gamification: restore XP / tokens / streak before first frame.
   await GamificationStateNotifier.instance.load();
-  GamificationStateNotifier.instance.markDailyActive();
+  GamificationStateNotifier.instance.markDailyActive(null, true);
 
   // Energy labels are local-first: restore before first frame so cards
   // never flash unlabeled.

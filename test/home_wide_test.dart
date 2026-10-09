@@ -8,17 +8,17 @@ import 'package:flutter/rendering.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-/// Home's product contract (productivity-first era):
-/// bento header -> Today's Flow board -> planner -> collapsed 12-week
-/// evidence -> shortcuts. The work owns the first viewport; metrics sit
-/// below it, and the heatmap opens only on demand.
+/// Home's product contract:
+/// bento header -> planner -> visible 12-week evidence -> shortcuts ->
+/// Today's Flow board FINAL. The board closes the page after the proof
+/// and the doors; the heatmap reads on the page, collapsible on demand.
 void main() {
   setUp(() => SharedPreferences.setMockInitialValues({
         // First-run concept map dismissed: the steady-state layout.
         'bloom_concept_seen_v1': true,
       }));
 
-  testWidgets('board sits above the fold, evidence collapses below it',
+  testWidgets('board closes the page below evidence and doors',
       (tester) async {
     for (final mobile in [true, false]) {
       final w = mobile ? 390.0 : 1400.0;
@@ -76,19 +76,19 @@ void main() {
         expect(headerRect.height, greaterThanOrEqualTo(110),
             reason: 'bento is a real header, width $w');
       }
-      // Order: header -> board -> evidence disclosure -> shortcuts.
-      // The board owns the first viewport; metrics sit below the work.
-      expect(headerRect.bottom, lessThanOrEqualTo(boardRect.top),
-          reason: 'board directly under header, width $w');
-      expect(boardRect.bottom, lessThanOrEqualTo(disclosureRect.top),
-          reason: 'evidence below the work, width $w');
+      // Order: header -> evidence disclosure -> shortcuts -> board.
+      // The board closes the page; the heatmap reads above the work.
+      expect(headerRect.bottom, lessThanOrEqualTo(disclosureRect.top),
+          reason: 'evidence after header, width $w');
       expect(disclosureRect.bottom,
           lessThanOrEqualTo(shortcutRect.top),
           reason: 'shortcuts under the evidence, width $w');
+      expect(shortcutRect.bottom, lessThanOrEqualTo(boardRect.top),
+          reason: 'board final, width $w');
     }
   });
 
-  testWidgets('evidence disclosure expands the heatmap on tap',
+  testWidgets('evidence reads by default, collapses on tap',
       (tester) async {
     tester.view.physicalSize = const Size(390, 1400);
     tester.view.devicePixelRatio = 1.0;
@@ -101,18 +101,17 @@ void main() {
     await tester.pump(const Duration(seconds: 2));
     expect(tester.takeException(), isNull);
 
-    // Collapsed by default: the grid stays offstage until asked for.
-    expect(find.byType(ContributionHeatmap), findsNothing,
-        reason: 'heatmap collapsed by default');
+    // Visible by default: the grid reads on the page.
+    expect(find.byType(ContributionHeatmap), findsOneWidget);
+    expect(find.text('Hide'), findsOneWidget);
 
-    await tester.tap(find.text('Show'));
+    await tester.tap(find.text('Hide'));
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 300));
     expect(tester.takeException(), isNull);
-    final heatRect = tester.getRect(find.byType(ContributionHeatmap));
-    expect(heatRect.height, greaterThan(100),
-        reason: 'heatmap expands on demand');
-    expect(find.text('Hide'), findsOneWidget);
+    expect(find.byType(ContributionHeatmap), findsNothing,
+        reason: 'heatmap collapses on demand');
+    expect(find.text('Show'), findsOneWidget);
   });
 
   testWidgets('bento header carries the intention, seedling and streak',

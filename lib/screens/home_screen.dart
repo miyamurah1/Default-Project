@@ -18,6 +18,7 @@ import '../data/reminders.dart';
 import '../data/haptics.dart';
 import '../data/mock_data.dart';
 import '../data/task_repository.dart';
+import '../game/first_week_arc.dart';
 import '../game/game.dart';
 import '../theme/app_motion.dart';
 import '../theme/sakura_theme.dart';
@@ -29,6 +30,7 @@ import '../widgets/daily_intention_card.dart';
 import '../widgets/first_task_guide.dart';
 import '../widgets/level_up_burst.dart';
 import '../widgets/motion.dart';
+import '../widgets/quick_add_task_sheet.dart';
 import '../widgets/task_flow_list.dart';
 import 'focus_timer_screen.dart';
 import 'history_screen.dart';
@@ -46,10 +48,10 @@ import 'task_detail_screen.dart';
 ///
 /// - Bento header — [DailyIntentionCard] (compact) + [_GameHud]
 ///   (seedling rank / XP / streak) in one band.
-/// - [TaskFlowList] — Today's tasks FIRST, directly under the header:
-///   the work owns the first viewport.
-/// - Planner card, then the 12-week [ContributionHeatmap] behind a
-///   collapsed disclosure, then [_QuickLinks] doors.
+/// - Planner card, then the 12-week [ContributionHeatmap] (visible,
+///   collapsible), then [_QuickLinks] doors.
+/// - [TaskFlowList] — Today's tasks FINAL, at the bottom: the work
+///   closes the page after the proof and the doors.
 ///
 /// Habit tracking lives only in the dedicated Habits tab
 /// (`HabitsScreen`) — Home intentionally shows no habit UI.
@@ -104,10 +106,10 @@ class _HomeScreenState extends State<HomeScreen> {
   /// "Stake" arms tonight's settle; passive days can't wilt.
   bool _staked = false;
 
-  /// 12-week evidence grid starts collapsed: the work sits above the
-  /// fold, the proof one tap below. State survives rebuilds (not
-  /// route pops — the default is the product decision).
-  bool _heatExpanded = false;
+  /// 12-week evidence grid. Expanded by default so the proof is
+  /// visible; collapsible for a shorter scroll. State survives
+  /// rebuilds (not route pops — visible is the product decision).
+  bool _heatExpanded = true;
 
   /// Peak finishing hour from Insights (best hour to tackle #1).
   /// Fetched on plan only — never blocks the plan itself.
@@ -143,6 +145,7 @@ class _HomeScreenState extends State<HomeScreen> {
     _heat = _zeroHeat();
     _loadConcept();
     _loadLastPlan();
+    FirstWeekArc.instance.load();
     // Offline-first: Home renders the repository's cached tasks and
     // repaints whenever it changes, so a failed sync never blanks the
     // screen. The repo owns optimistic edits + local persistence.
@@ -242,7 +245,7 @@ class _HomeScreenState extends State<HomeScreen> {
   Future<void> _syncPlanWidget() async {
     if (!_plannedOnce || _picks.isEmpty) return;
     final done = TaskRepository.instance.doneTasks.map((t) => t.id).toSet();
-    await PlanWidgetBridge.pushPlan([
+    final rows = [
       for (final p in _picks)
         (
           id: p.id,
@@ -250,7 +253,12 @@ class _HomeScreenState extends State<HomeScreen> {
           reason: p.reason,
           done: done.contains(p.id),
         ),
-    ]);
+    ];
+    await PlanWidgetBridge.pushPlan(rows);
+    // Remember the plan so any screen's completion can refresh ✓ flags
+    // — completing from the detail screen, board, folders, or search.
+    PlanWidgetBridge.rememberPlan(
+        rows.map((r) => (id: r.id, title: r.title, reason: r.reason)).toList());
   }
 
   /// Plan the carried draft first: yesterday's unfinished, same stakes.
@@ -631,6 +639,8 @@ class _HomeScreenState extends State<HomeScreen> {
       AppHaptics.tap();
       _saveLastPlan(picks.map((p) => p.id).toList());
       _syncPlanWidget();
+      FirstWeekArc.instance.report(FirstWeekStep.planned);
+      _syncBannerHint();
       // Peak hour annotates the plan; failure keeps the plan as-is.
       try {
         final ins = await _api.fetchInsights();
@@ -731,6 +741,79 @@ class _HomeScreenState extends State<HomeScreen> {
         .stakeDay(_picks.map((p) => p.id).toList());
     setState(() => _staked = true);
     AppHaptics.tap();
+    FirstWeekArc.instance.report(FirstWeekStep.staked);
+    _syncBannerHint();
+  }
+
+  /// First-week arc: refresh the prompt row (state lives in the store).
+  void _syncBannerHint() => setState(() {});
+
+  Widget _arcRow() {
+    final step = FirstWeekArc.instance.nextStep;
+    if (step == null) return const SizedBox.shrink();
+    const tags = ['FIRST GARDEN', 'DAILY PLAN', 'COMMIT'];
+    const ctas = ['Plant', 'Plan', 'Stake'];
+    return GestureDetector(
+      onTap: _arcAction,
+      behavior: HitTestBehavior.opaque,
+      child: Container(
+        width: double.infinity,
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 11),
+        decoration: BoxDecoration(
+          color: SakuraColors.primary.withValues(alpha: 0.07),
+          borderRadius: BorderRadius.circular(14),
+          border:
+              Border.all(color: SakuraColors.primary.withValues(alpha: 0.25)),
+        ),
+        child: Row(
+          children: [
+            Text(
+              tags[step],
+              style: TextStyle(
+                fontSize: 10,
+                letterSpacing: 2.0,
+                fontWeight: FontWeight.w700,
+                color: SakuraColors.primary,
+              ),
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Text(
+                FirstWeekArc.instance.prompt,
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                    fontSize: 12.5,
+                    height: 1.35,
+                    color: SakuraColors.ink),
+              ),
+            ),
+            const SizedBox(width: 8),
+            Text(
+              ctas[step],
+              style: TextStyle(
+                fontSize: 12,
+                fontWeight: FontWeight.w800,
+                color: SakuraColors.primary,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// Arc CTA: plant opens the FAB sheet, plan plans, stake stakes.
+  void _arcAction() {
+    final step = FirstWeekArc.instance.nextStep;
+    if (step == null) return;
+    if (step == 0) {
+      showQuickAddTask(context);
+    } else if (step == 1) {
+      _planDay();
+    } else {
+      _stake();
+    }
   }
 
   /// Morning settle: if yesterday had a stake, compare it against current
@@ -754,6 +837,20 @@ class _HomeScreenState extends State<HomeScreen> {
     } else if (result.lost > 0) {
       showBloomSnackBar(context,
           'Yesterday wilted −${result.lost} XP · ${result.kept} kept — today is fresh.');
+    } else if (result.kept >= 3) {
+      // A stake kept in full is the peak moment to share: one prompt,
+      // the same snackbar, and an action that jumps to the review's
+      // share card. Nudge, never auto-share.
+      showBloomSnackBar(
+        context,
+        'Clean sweep — a week worth sharing.',
+        actionLabel: 'Share',
+        onAction: () {
+          Navigator.of(context).push(
+            SakuraPageRoute(builder: (_) => const ReviewScreen()),
+          );
+        },
+      );
     } else if (result.kept > 0) {
       showBloomSnackBar(context, 'Clean sweep — nothing wilted.');
     }
@@ -1314,9 +1411,10 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  /// 12-week evidence grid behind a disclosure: collapsed by default so
-  /// today's work owns the first viewport; the grid keeps its state
-  /// while hidden (maintainState) so collapsing never refetches.
+  /// 12-week evidence grid behind a disclosure: visible by default so
+  /// the proof reads on the page; collapsible for a shorter scroll.
+  /// The grid keeps its state while hidden (maintainState) so
+  /// collapsing never refetches.
   Widget _collapsibleHeat() {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -1329,16 +1427,20 @@ class _HomeScreenState extends State<HomeScreen> {
             padding: const EdgeInsets.symmetric(vertical: 4),
             child: Row(
               children: [
-                Text(
-                  '12-WEEK EVIDENCE',
-                  style: TextStyle(
-                    fontSize: 11,
-                    letterSpacing: 2.2,
-                    fontWeight: FontWeight.w600,
-                    color: SakuraColors.inkFaint,
+                Expanded(
+                  child: Text(
+                    '12-WEEK EVIDENCE',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontSize: 11,
+                      letterSpacing: 2.2,
+                      fontWeight: FontWeight.w600,
+                      color: SakuraColors.inkFaint,
+                    ),
                   ),
                 ),
-                const Spacer(),
+                const SizedBox(width: 8),
                 Text(
                   _heatExpanded ? 'Hide' : 'Show',
                   style: TextStyle(
@@ -1403,8 +1505,44 @@ class _HomeScreenState extends State<HomeScreen> {
             ),
           ),
           const SliverToBoxAdapter(child: SizedBox(height: 12)),
-          // Today's Flow FIRST: the work owns the first viewport, right
-          // under the header. Metrics and doors moved below it.
+          // First-week arc: one quiet prompt until the loop is learned.
+          SliverToBoxAdapter(
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 20),
+              child: _arcRow(),
+            ),
+          ),
+          // Today's Flow FINAL position is below — see the board block
+          // after the review doors. Planner sits here instead.
+          SliverToBoxAdapter(
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 20),
+              child: _plannerCard(),
+            ),
+          ),
+          const SliverToBoxAdapter(child: SizedBox(height: 12)),
+          // Evidence below the work, collapsed until asked for.
+          SliverToBoxAdapter(
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 20),
+              child: _collapsibleHeat(),
+            ),
+          ),
+          const SliverToBoxAdapter(child: SizedBox(height: 12)),
+          // Doors to review (Board / History / Insights / Review).
+          SliverList(
+            delegate: SliverChildBuilderDelegate(
+              (context, i) => Padding(
+                key: ValueKey('home_quick_link_$i'),
+                padding: const EdgeInsets.symmetric(horizontal: 20),
+                child: _QuickLinks.rowItem(i, context),
+              ),
+              childCount: 4,
+            ),
+          ),
+          const SliverToBoxAdapter(child: SizedBox(height: 12)),
+          // Today's Flow FINAL: the work closes the page, sitting under
+          // the header, the plan, the evidence, and the doors.
           SliverToBoxAdapter(
             child: Padding(
               padding: const EdgeInsets.symmetric(horizontal: 20),
@@ -1434,32 +1572,6 @@ class _HomeScreenState extends State<HomeScreen> {
                 ),
               ),
             ),
-          SliverToBoxAdapter(
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 20),
-              child: _plannerCard(),
-            ),
-          ),
-          const SliverToBoxAdapter(child: SizedBox(height: 12)),
-          // Evidence below the work, collapsed until asked for.
-          SliverToBoxAdapter(
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 20),
-              child: _collapsibleHeat(),
-            ),
-          ),
-          const SliverToBoxAdapter(child: SizedBox(height: 12)),
-          // Doors to review (Board / History / Insights / Review).
-          SliverList(
-            delegate: SliverChildBuilderDelegate(
-              (context, i) => Padding(
-                key: ValueKey('home_quick_link_$i'),
-                padding: const EdgeInsets.symmetric(horizontal: 20),
-                child: _QuickLinks.rowItem(i, context),
-              ),
-              childCount: 4,
-            ),
-          ),
           const SliverToBoxAdapter(child: SizedBox(height: 24)),
         ],
       ),
@@ -1495,7 +1607,27 @@ class _HomeScreenState extends State<HomeScreen> {
               child: Container(key: _intentionKey, child: _bentoHeader()),
             ),
             const SizedBox(height: 12),
-            // Today's Flow FIRST: the work owns the first viewport.
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 20),
+              child: _arcRow(),
+            ),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 20),
+              child: _plannerCard(),
+            ),
+            const SizedBox(height: 12),
+            // Evidence above the work — same order as mobile.
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 20),
+              child: _collapsibleHeat(),
+            ),
+            const SizedBox(height: 12),
+            const Padding(
+              padding: EdgeInsets.symmetric(horizontal: 20),
+              child: _QuickLinks(key: ValueKey('home_quick_links')),
+            ),
+            const SizedBox(height: 12),
+            // Today's Flow FINAL: the work closes the page.
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 20),
               child: Container(
@@ -1521,21 +1653,6 @@ class _HomeScreenState extends State<HomeScreen> {
                   creating: _creatingSample,
                 ),
               ),
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 20),
-              child: _plannerCard(),
-            ),
-            const SizedBox(height: 12),
-            // Evidence below the work, collapsed until asked for.
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 20),
-              child: _collapsibleHeat(),
-            ),
-            const SizedBox(height: 12),
-            const Padding(
-              padding: EdgeInsets.symmetric(horizontal: 20),
-              child: _QuickLinks(key: ValueKey('home_quick_links')),
-            ),
             const SizedBox(height: 24),
           ],
         ),

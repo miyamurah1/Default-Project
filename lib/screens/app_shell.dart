@@ -1,7 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
-import 'package:home_widget/home_widget.dart';
+import 'package:flutter/services.dart';
 import 'package:lucide_flutter/lucide_flutter.dart';
 
 import '../data/focus_controller.dart';
@@ -66,11 +66,15 @@ class _AppShellState extends State<AppShell>
       _openWidgetUri(PlanWidgetBridge.parsePlanWidgetUri(uri));
       _drainNotifTask();
     });
-    // Warm taps while the shell is alive.
-    _widgetClicks = HomeWidget.widgetClicked.listen(
+    // Warm taps while the shell is alive. Guarded: the updates
+    // channel does not exist on web/desktop, where subscribing throws
+    // during stream activation (uncatchable via onError).
+    _widgetClicks = PlanWidgetBridge.listenWidgetClicks(
       (uri) => _openWidgetUri(PlanWidgetBridge.parsePlanWidgetUri(uri)),
-      onError: (_) {},
     );
+    // Every task mutation anywhere in the app must refresh the widget's
+    // ✓ flags — hence the repo listener at the shell, not per-screen.
+    TaskRepository.instance.addListener(_syncWidgetDoneFlags);
   }
 
   /// Route a widget tap: task deep-link opens its detail, plan jumps to
@@ -100,9 +104,17 @@ class _AppShellState extends State<AppShell>
 
   @override
   void dispose() {
+    TaskRepository.instance.removeListener(_syncWidgetDoneFlags);
     _widgetClicks?.cancel();
     WidgetsBinding.instance.removeObserver(this);
     super.dispose();
+  }
+
+  /// TaskRepository -> widget done flags. The bridge diffs internally,
+  /// so only real changes cost a platform call.
+  void _syncWidgetDoneFlags() {
+    PlanWidgetBridge.noteDoneIds(
+        TaskRepository.instance.doneTasks.map((t) => t.id).toSet());
   }
 
   @override
@@ -139,6 +151,17 @@ class _AppShellState extends State<AppShell>
       _index = i;
       _visited.add(i);
     });
+  }
+
+  /// Android back: on any tab but Today it returns to Today instead of
+  /// quitting the app (standard Android tab behaviour); on Today it
+  /// falls through to the default (background the app).
+  void _handleSystemBack() {
+    if (_index != 0) {
+      _go(0);
+      return;
+    }
+    SystemNavigator.pop();
   }
 
   // Fresh (non-const) instances every build so a theme change repaints
@@ -269,7 +292,15 @@ class _AppShellState extends State<AppShell>
         // are the same instances, so Flutter skips them entirely.
         final scaffold = Scaffold(
           backgroundColor: SakuraColors.background,
-          body: body,
+          body: PopScope(
+            canPop: _index == 0,
+            onPopInvokedWithResult: (didPop, _) {
+              // Today: default exit/background the app.
+              if (didPop) return;
+              _handleSystemBack();
+            },
+            child: body,
+          ),
           // Contextual "plant" FAB: task on Today/Folders, ritual on
           // Rituals, none on Insights. Cross-fades as tabs change.
           floatingActionButton: AnimatedSwitcher(

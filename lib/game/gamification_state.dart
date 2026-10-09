@@ -174,8 +174,10 @@ class GamificationStateNotifier extends ChangeNotifier {
   /// Milestones feel like milestones: 7/30/100-day streaks fire the
   /// celebration fanfare (heavy impact); an ordinary next-day tick fires
   /// the confirm tick. Same-day no-ops and broken resets stay silent —
-  /// haptics reward progress, never punish a miss.
-  void markDailyActive([DateTime? now]) {
+  /// haptics reward progress, never punish a miss. Pass [quiet] at boot:
+  /// browsers block vibration before the first user gesture and log an
+  /// intervention, so the startup tick stays silent.
+  void markDailyActive([DateTime? now, bool quiet = false]) {
     final day = _dayKey(now ?? DateTime.now());
     if (_lastDayIso == day) return;
     var grown = false;
@@ -202,7 +204,7 @@ class GamificationStateNotifier extends ChangeNotifier {
     _lastDayIso = day;
     _persist();
     notifyListeners();
-    if (!grown) return;
+    if (!grown || quiet) return;
     if (_streak == 7 || _streak == 30 || _streak == 100) {
       AppHaptics.celebrate();
     } else {

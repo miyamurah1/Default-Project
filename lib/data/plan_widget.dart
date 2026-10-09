@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 import 'package:home_widget/home_widget.dart';
 
@@ -25,6 +27,9 @@ class PlanWidgetBridge {
 
   /// Deep-link scheme for widget taps. Never leaves the device.
   static const kScheme = 'dailybloom';
+
+  static const String planUri = '$kScheme://plan';
+  static String taskUri(String id) => '$kScheme://task/$id';
 
   static bool get _supported =>
       !kIsWeb &&
@@ -64,6 +69,21 @@ class PlanWidgetBridge {
     }
   }
 
+  /// Warm tap subscription. Returns null off Android/iOS (web,
+  /// desktop, tests) where the `home_widget/updates` channel does not
+  /// exist — subscribing unguarded throws MissingPluginException during
+  /// stream activation, which `onError` cannot catch.
+  static StreamSubscription<Uri?>? listenWidgetClicks(
+    void Function(Uri?) onData,
+  ) {
+    if (!_supported) return null;
+    try {
+      return HomeWidget.widgetClicked.listen(onData, onError: (_) {});
+    } catch (_) {
+      return null;
+    }
+  }
+
   /// URI the app was cold-started with via a widget tap, if any.
   static Future<Uri?> initialLaunchUri() async {
     if (!_supported) return null;
@@ -74,8 +94,45 @@ class PlanWidgetBridge {
     }
   }
 
-  static String taskUri(String id) => '$kScheme://task/$id';
-  static const String planUri = '$kScheme://plan';
+  /// Named row the app last pushed to the widget. Home registers its
+  /// plan here once (type-safe, one record per task) so every screen
+  /// that completes a task can refresh the widget's ✓ flags.
+  static ({String id, String title, String reason})? _lastPlanRow;
+
+  static final ValueNotifier<int> _doneRevision = ValueNotifier<int>(0);
+
+  /// Widget source of truth for done state: the repository's done set,
+  /// refreshed by AppShell when tasks change.
+  static Set<String> _doneIds = {};
+
+  /// Remember the last pushed plan so other screens can refresh it.
+  static void rememberPlan(
+      List<({String id, String title, String reason})> rows) {
+    if (rows.isEmpty) return;
+    _lastPlanRow = rows.first;
+  }
+
+  /// Re-push the remembered plan with fresh ✓ flags. Safe from any
+  /// screen: no-ops when no plan was pushed yet or off mobile.
+  static Future<void> refreshDoneFlags() async {
+    final row = _lastPlanRow;
+    if (row == null) return;
+    _doneRevision.value++;
+    await pushPlan([
+      (id: row.id, title: row.title, reason: row.reason,
+       done: _doneIds.contains(row.id)),
+    ]);
+  }
+
+  /// Called by the shell when task statuses change (any screen).
+  static void noteDoneIds(Set<String> doneIds) {
+    if (_doneIds.length == doneIds.length &&
+        _doneIds.containsAll(doneIds)) {
+      return;
+    }
+    _doneIds = doneIds;
+    refreshDoneFlags();
+  }
 
   /// `dailybloom://task/<id>` or `dailybloom://plan`, else null.
   /// Pure function — unit-tested, no platform calls.
