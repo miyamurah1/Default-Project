@@ -26,6 +26,10 @@
 	<string>$(FLUTTER_BUILD_NUMBER)</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Daily Bloom uses the microphone only when you tap the mic button to dictate a task.</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>Daily Bloom transcribes your dictated task titles on-device where possible.</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>

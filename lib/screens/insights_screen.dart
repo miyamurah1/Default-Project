@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:lucide_flutter/lucide_flutter.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
+import '../data/ai_client.dart';
 import '../data/api_client.dart';
 import '../data/auth_store.dart';
 import '../theme/sakura_theme.dart';
@@ -183,6 +185,14 @@ class _InsightsScreenState extends State<InsightsScreen> {
                                   value:
                                       '${data.streakCurrent}d')),
                         ],
+                      ),
+                      const SizedBox(height: 12),
+                      _NarrativeCard(
+                        tips: tips,
+                        done: data.byTag.fold<int>(
+                            0, (a, s) => a + s.done),
+                        streak: data.streakCurrent,
+                        focusMinutes: data.focusMinutes7,
                       ),
                       const SizedBox(height: 12),
                       Container(
@@ -460,6 +470,146 @@ class _Stat extends StatelessWidget {
               fontWeight: FontWeight.w800,
               color: SakuraColors.primary,
               fontFeatures: const [FontFeature.tabularFigures()],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Week's story: 2-3 sentence Bloom-tone narrative over the stats.
+/// Server upgrades prose (Flash-Lite); offline uses the local template.
+/// Cached per calendar week so it costs at most one call a week.
+class _NarrativeCard extends StatefulWidget {
+  final List<String> tips;
+  final int done;
+  final int streak;
+  final int focusMinutes;
+
+  const _NarrativeCard({
+    required this.tips,
+    required this.done,
+    required this.streak,
+    required this.focusMinutes,
+  });
+
+  @override
+  State<_NarrativeCard> createState() => _NarrativeCardState();
+}
+
+class _NarrativeCardState extends State<_NarrativeCard> {
+  String? _text;
+  bool _loading = true;
+
+  static String _weekKey([DateTime? now]) {
+    final d = now ?? DateTime.now();
+    final dayOfYear = d.difference(DateTime(d.year)).inDays + 1;
+    final week = (dayOfYear / 7).ceil();
+    return 'ai_narrative_${d.year}W$week';
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load({bool refresh = false}) async {
+    setState(() => _loading = true);
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final key = _weekKey();
+      if (!refresh) {
+        final cached = prefs.getString(key);
+        if (cached != null && cached.isNotEmpty) {
+          if (mounted) setState(() => _text = cached);
+        }
+      }
+      if (mounted && (_text == null || refresh)) {
+        final text = await AiClient().narrative(
+          widget.tips,
+          done: widget.done,
+          streak: widget.streak,
+          focusMinutes: widget.focusMinutes,
+        );
+        await prefs.setString(key, text);
+        if (mounted) setState(() => _text = text);
+      }
+    } catch (_) {
+      if (mounted && _text == null) {
+        setState(() => _text = narrativeLocal(widget.tips,
+            done: widget.done,
+            streak: widget.streak,
+            focusMinutes: widget.focusMinutes));
+      }
+    } finally {
+      if (mounted) setState(() => _loading = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.all(20),
+      decoration: SakuraTheme.cardDecoration(),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Text(
+                "WEEK'S STORY",
+                style: TextStyle(
+                  fontSize: 11,
+                  letterSpacing: 2.2,
+                  fontWeight: FontWeight.w600,
+                  color: SakuraColors.inkFaint,
+                ),
+              ),
+              const Spacer(),
+              GestureDetector(
+                onTap: _loading ? null : () => _load(refresh: true),
+                behavior: HitTestBehavior.opaque,
+                child: Icon(
+                  LucideIcons.refreshCw,
+                  size: 13,
+                  color: SakuraColors.primary,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          if (_loading && _text == null)
+            Center(
+              child: Padding(
+                padding: const EdgeInsets.symmetric(vertical: 8),
+                child: SizedBox(
+                  width: 18,
+                  height: 18,
+                  child: CircularProgressIndicator(
+                    strokeWidth: 2,
+                    color: SakuraColors.primary,
+                  ),
+                ),
+              ),
+            )
+          else
+            Text(
+              _text ?? '',
+              style: TextStyle(
+                fontSize: 14,
+                height: 1.55,
+                color: SakuraColors.ink,
+              ),
+            ),
+          const SizedBox(height: 8),
+          Text(
+            'told by Bloom',
+            style: TextStyle(
+              fontSize: 10.5,
+              fontStyle: FontStyle.italic,
+              color: SakuraColors.inkFaint,
             ),
           ),
         ],

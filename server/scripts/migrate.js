@@ -30,6 +30,7 @@ const ORDER = [
   'migration_014_subtask_history.sql',
   'migration_015_subtask_completion.sql',
   'migration_016_midnight_free.sql',
+  'migration_017_free_focus.sql',
 ];
 
 const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL });

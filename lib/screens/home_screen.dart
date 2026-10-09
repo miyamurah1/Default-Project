@@ -1,16 +1,27 @@
+import 'dart:async';
+import 'dart:io';
+
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:lucide_flutter/lucide_flutter.dart';
+import 'package:share_plus/share_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../data/ai_client.dart';
 import '../data/api_client.dart';
 import '../data/auth_store.dart';
+import '../data/calendar_export.dart';
 import '../data/energy_store.dart';
+import '../data/habit_store.dart';
+import '../data/plan_widget.dart';
+import '../data/reminders.dart';
+import '../data/haptics.dart';
 import '../data/mock_data.dart';
 import '../data/task_repository.dart';
 import '../game/game.dart';
 import '../theme/app_motion.dart';
 import '../theme/sakura_theme.dart';
+import '../widgets/bloom_snackbar.dart';
 import '../widgets/concept_map_card.dart';
 import '../widgets/contribution_heatmap.dart';
 import '../widgets/daily_bloom_app_bar.dart';
@@ -34,12 +45,11 @@ import 'task_detail_screen.dart';
 /// all section UI is delegated to modular widgets. Top-to-bottom order:
 ///
 /// - Bento header — [DailyIntentionCard] (compact) + [_GameHud]
-///   (seedling rank / XP / streak) in one ~130px band.
-/// - [ContributionHeatmap] — 12-week GitHub-style grid: the day's
-///   evidence, sitting directly under the header.
-/// - [_QuickLinks] — Board matrix / History / Insights / Review doors.
-/// - [TaskFlowList] — Kanban board (`widgets/task_flow_list.dart`),
-///   intentionally last: the work sits below the proof and the doors.
+///   (seedling rank / XP / streak) in one band.
+/// - [TaskFlowList] — Today's tasks FIRST, directly under the header:
+///   the work owns the first viewport.
+/// - Planner card, then the 12-week [ContributionHeatmap] behind a
+///   collapsed disclosure, then [_QuickLinks] doors.
 ///
 /// Habit tracking lives only in the dedicated Habits tab
 /// (`HabitsScreen`) — Home intentionally shows no habit UI.
@@ -84,6 +94,25 @@ class _HomeScreenState extends State<HomeScreen> {
   bool _conceptVisible = true;
   bool _creatingSample = false;
 
+  /// AI day planner: top-3 picks with reasons. Server upgrades quality
+  /// (Flash-Lite); offline falls back to local scoring so it always works.
+  bool _planning = false;
+  bool _plannedOnce = false;
+  List<AiPick> _picks = const [];
+
+  /// Explicit stake opt-in: planning alone never risks XP. Tapping
+  /// "Stake" arms tonight's settle; passive days can't wilt.
+  bool _staked = false;
+
+  /// 12-week evidence grid starts collapsed: the work sits above the
+  /// fold, the proof one tap below. State survives rebuilds (not
+  /// route pops — the default is the product decision).
+  bool _heatExpanded = false;
+
+  /// Peak finishing hour from Insights (best hour to tackle #1).
+  /// Fetched on plan only — never blocks the plan itself.
+  int? _peakHour;
+
   /// In-home section nav (Intention / Flow).
   int _sectionIndex = 0;
   final ScrollController _mobileScroll = ScrollController();
@@ -113,12 +142,18 @@ class _HomeScreenState extends State<HomeScreen> {
     super.initState();
     _heat = _zeroHeat();
     _loadConcept();
+    _loadLastPlan();
     // Offline-first: Home renders the repository's cached tasks and
     // repaints whenever it changes, so a failed sync never blanks the
     // screen. The repo owns optimistic edits + local persistence.
     TaskRepository.instance.addListener(_onRepoChanged);
     TaskRepository.instance.init();
     _refresh();
+    // Evening review invite on first open past 8pm (behavior, not alarm).
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || DateTime.now().hour < 20) return;
+      _maybeReviewNudge(evening: true);
+    });
   }
 
   /// Repository -> local lists. Fires on cache load, remote sync and
@@ -130,7 +165,110 @@ class _HomeScreenState extends State<HomeScreen> {
       _todo = TaskRepository.instance.todoTasks;
       _prog = TaskRepository.instance.inProgressTasks;
       _done = TaskRepository.instance.doneTasks;
+      _updateCarry();
     });
+    // Keep due-date alarms truthful: diff-only, so steady state costs
+    // zero platform calls. Retimed/completed/deleted tasks re-arm here.
+    unawaited(
+        ReminderService.instance.syncTaskReminders(TaskRepository.instance.tasks));
+  }
+
+  /// Yesterday's unfinished plan, carried as tomorrow's draft: the user
+  /// confirms instead of authoring from blank. Persisted as ids + day.
+  static const _kLastPlanDay = 'ai_last_plan_day';
+  static const _kLastPlanIds = 'bloom_last_plan_ids';
+  String? _lastPlanDay;
+  List<String> _lastPlanIds = const [];
+  List<Task> _carry = const [];
+
+  Future<void> _loadLastPlan() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      if (!mounted) return;
+      setState(() {
+        _lastPlanDay = prefs.getString(_kLastPlanDay);
+        _lastPlanIds = prefs.getStringList(_kLastPlanIds) ?? const [];
+        _updateCarry();
+      });
+    } catch (_) {}
+  }
+
+  /// Recompute the carry draft from the live lists: last plan was
+  /// yesterday and those ids are still open.
+  void _updateCarry() {
+    final day = _lastPlanDay;
+    if (day == null || _lastPlanIds.isEmpty) {
+      if (_carry.isNotEmpty) _carry = const [];
+      return;
+    }
+    // Day-boundary safe: parse + compare dates, never day-1 arithmetic.
+    DateTime? planDay;
+    try {
+      planDay = DateTime.parse(day);
+    } catch (_) {
+      planDay = null;
+    }
+    final now = DateTime.now();
+    final isYesterday = planDay != null &&
+        _dayOnly(now).difference(_dayOnly(planDay)).inDays == 1;
+    if (!isYesterday) {
+      if (_carry.isNotEmpty) _carry = const [];
+      return;
+    }
+    final open = {for (final t in [..._todo, ..._prog]) t.id: t};
+    _carry = [
+      for (final id in _lastPlanIds)
+        if (open.containsKey(id)) open[id]!,
+    ];
+  }
+
+  static DateTime _dayOnly(DateTime d) => DateTime(d.year, d.month, d.day);
+
+  Future<void> _saveLastPlan(List<String> ids) async {
+    final now = DateTime.now();
+    final day =
+        '${now.year.toString().padLeft(4, '0')}-${now.month.toString().padLeft(2, '0')}-${now.day.toString().padLeft(2, '0')}';
+    _lastPlanDay = day;
+    _lastPlanIds = ids;
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(_kLastPlanDay, day);
+      await prefs.setStringList(_kLastPlanIds, ids);
+    } catch (_) {}
+  }
+
+  /// Push the current plan to the home-screen widget (top-3 + done
+  /// flags). Best-effort: no-ops off Android/iOS, never throws.
+  Future<void> _syncPlanWidget() async {
+    if (!_plannedOnce || _picks.isEmpty) return;
+    final done = TaskRepository.instance.doneTasks.map((t) => t.id).toSet();
+    await PlanWidgetBridge.pushPlan([
+      for (final p in _picks)
+        (
+          id: p.id,
+          title: p.title,
+          reason: p.reason,
+          done: done.contains(p.id),
+        ),
+    ]);
+  }
+
+  /// Plan the carried draft first: yesterday's unfinished, same stakes.
+  void _planCarry() {
+    if (_carry.isEmpty || _planning) return;
+    final picks = _carry
+        .take(3)
+        .map((t) => AiPick(id: t.id, title: t.title, reason: 'carried over'))
+        .toList();
+    setState(() {
+      _picks = picks;
+      _plannedOnce = true;
+      _carry = const [];
+      _staked = false;
+    });
+    AppHaptics.tap();
+    _saveLastPlan(picks.map((p) => p.id).toList());
+    _syncPlanWidget();
   }
 
   /// The concept map shows until dismissed once (persisted). Offline test
@@ -178,18 +316,13 @@ class _HomeScreenState extends State<HomeScreen> {
       }
       await _refresh();
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-              content: Text(
-                  'Welcome blooms planted — tap the first one done. 🌸')),
-        );
+        showBloomSnackBar(context,
+            'Welcome blooms planted — tap the first one done. 🌸');
       }
     } catch (e) {
       if (mounted) {
         if (e is AuthExpiredException) return;
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Could not plant — try again.')),
-        );
+        showBloomSnackBar(context, 'Could not plant — try again.');
       }
     } finally {
       if (mounted) setState(() => _creatingSample = false);
@@ -223,7 +356,9 @@ class _HomeScreenState extends State<HomeScreen> {
       await TaskRepository.instance.loadRemote(withDetails: true);
       await EnergyStore.instance
           .prune(TaskRepository.instance.tasks.map((t) => t.id));
+      _settleStakes(); // yesterday's stake resolves against fresh statuses
       await _syncIntention();
+      _maybeHabitNudge(); // one quiet line when a streak ends tonight
     } catch (e) {
       if (!mounted) return;
       // Expired session: AuthStore already bounced to login via AuthGate.
@@ -255,16 +390,45 @@ class _HomeScreenState extends State<HomeScreen> {
     // Repository move is optimistic + persisted: the board updates at
     // 0ms and survives offline. No "start the backend" dead-end.
     await TaskRepository.instance.moveTask(t.id, next);
+    _syncPlanWidget(); // widget ✓ flags stay truthful
     if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-            content: Text(next == 'done'
-                ? 'Done — heatmap +1 (like git commit).'
-                : 'Back in progress — finish it.')),
-      );
+      showBloomSnackBar(
+          context,
+          next == 'done'
+              ? 'Done — heatmap +1 (like git commit).'
+              : 'Back to to-do — start it when ready.');
     }
     // Analytics catch up only when the backend is reachable.
     if (_live) await _refresh();
+    // Third bloom of the day: behavior beats the clock — suggest the
+    // review while the evidence is fresh, exactly once.
+    _maybeReviewNudge();
+  }
+
+  /// Evening-or-milestone review invite. Fires once a day, either after
+  /// the 3rd completion or on first open past 8pm with something done —
+  /// never a fixed alarm, never a nag.
+  void _maybeReviewNudge({bool evening = false}) {
+    final game = GamificationStateNotifier.instance;
+    if (!mounted || game.reviewNudgedToday) return;
+    if (evening) {
+      if (game.todayCompletions == 0) return;
+    } else {
+      if (game.todayCompletions != 3) return;
+    }
+    game.markReviewNudged();
+    showBloomSnackBar(
+      context,
+      evening
+          ? 'Day is done — see how the week looks?'
+          : '3 blooms today — peek at your week?',
+      actionLabel: 'Review',
+      onAction: () {
+        Navigator.of(context).push(
+          SakuraPageRoute(builder: (_) => const ReviewScreen()),
+        );
+      },
+    );
   }
 
   void _openDetail(Task t) {
@@ -286,6 +450,313 @@ class _HomeScreenState extends State<HomeScreen> {
             builder: (_) =>
                 FocusTimerScreen(task: t, heroTag: 'home-focus-${t.id}')))
         .then((_) => _refresh()); // focus time may have grown
+  }
+
+  /// Backlog groom: duplicates to clear, stale to defer, vague to sharpen.
+  /// Server upgrades grouping (Flash-Lite); offline uses local rules.
+  /// Deletes and defers only run on explicit Apply — nothing auto-changes.
+  Future<void> _groom() async {
+    if (_planning) return;
+    setState(() => _planning = true);
+    try {
+      final groups = await AiClient().groom([..._todo, ..._prog]);
+      if (!mounted) return;
+      if (groups.isEmpty) {
+        showBloomSnackBar(context, 'Pile looks tidy — nothing to groom.');
+        return;
+      }
+      final byId = {for (final t in [..._todo, ..._prog]) t.id: t};
+      final selected = <String, Set<String>>{
+        for (final g in groups)
+          if (g.action != 'review') g.title: g.ids.toSet(),
+      };
+      final apply = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => StatefulBuilder(
+          builder: (ctx, setSheet) => AlertDialog(
+            backgroundColor: SakuraColors.surface,
+            shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(20)),
+            title: Text('Tidy the pile',
+                style: TextStyle(color: SakuraColors.ink)),
+            content: SizedBox(
+              width: double.maxFinite,
+              child: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    for (final g in groups) ...[
+                      Text(
+                        g.title,
+                        style: TextStyle(
+                          fontSize: 13,
+                          fontWeight: FontWeight.w800,
+                          color: SakuraColors.ink,
+                        ),
+                      ),
+                      Text(
+                        g.note,
+                        style: TextStyle(
+                            fontSize: 11.5,
+                            color: SakuraColors.inkSoft),
+                      ),
+                      const SizedBox(height: 4),
+                      if (g.action == 'review')
+                        for (final id in g.ids)
+                          GestureDetector(
+                            onTap: () {
+                              Navigator.of(ctx).pop(false);
+                              final t = byId[id];
+                              if (t != null) _openDetail(t);
+                            },
+                            behavior: HitTestBehavior.opaque,
+                            child: Padding(
+                              padding:
+                                  const EdgeInsets.symmetric(vertical: 3),
+                              child: Text(
+                                '• ${byId[id]?.title ?? id}',
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: TextStyle(
+                                  fontSize: 12.5,
+                                  color: SakuraColors.primary,
+                                ),
+                              ),
+                            ),
+                          )
+                      else
+                        for (final id in g.ids)
+                          CheckboxListTile(
+                            value: selected[g.title]?.contains(id) ?? false,
+                            onChanged: (v) => setSheet(() {
+                              if (v == true) {
+                                selected[g.title]?.add(id);
+                              } else {
+                                selected[g.title]?.remove(id);
+                              }
+                            }),
+                            title: Text(
+                              byId[id]?.title ?? id,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(
+                                  fontSize: 12.5,
+                                  color: SakuraColors.ink),
+                            ),
+                            subtitle: Text(
+                              g.action == 'delete-others'
+                                  ? 'clear copy'
+                                  : 'defer a week',
+                              style: TextStyle(
+                                  fontSize: 11,
+                                  color: SakuraColors.inkSoft),
+                            ),
+                            activeColor: SakuraColors.primary,
+                            contentPadding: EdgeInsets.zero,
+                            dense: true,
+                          ),
+                      const SizedBox(height: 8),
+                    ],
+                  ],
+                ),
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(ctx).pop(false),
+                child: Text('Cancel',
+                    style: TextStyle(color: SakuraColors.inkSoft)),
+              ),
+              FilledButton(
+                style: FilledButton.styleFrom(
+                    backgroundColor: SakuraColors.primary),
+                onPressed: () => Navigator.of(ctx).pop(true),
+                child: const Text('Apply'),
+              ),
+            ],
+          ),
+        ),
+      );
+      if (apply != true) return;
+      var cleared = 0;
+      var deferred = 0;
+      final nextWeek = DateTime.now().add(const Duration(days: 7));
+      for (final g in groups) {
+        final ids = selected[g.title] ?? const <String>{};
+        if (ids.isEmpty) continue;
+        if (g.action == 'delete-others') {
+          for (final id in ids) {
+            await TaskRepository.instance.deleteTask(id);
+            cleared++;
+          }
+        } else if (g.action == 'defer-week') {
+          for (final id in ids) {
+            await TaskRepository.instance
+                .updateTask(id, dueAt: nextWeek);
+            deferred++;
+          }
+        }
+      }
+      await _refresh();
+      if (mounted && (cleared > 0 || deferred > 0)) {
+        showBloomSnackBar(context,
+            'Tidied: $cleared cleared · $deferred deferred a week.');
+      }
+    } finally {
+      if (mounted) setState(() => _planning = false);
+    }
+  }
+
+  Task? _findTask(String id) {
+    for (final t in [..._todo, ..._prog, ..._done]) {
+      if (t.id == id) return t;
+    }
+    return null;
+  }
+
+  /// AI day plan: top-3 open tasks with reasons. Tap a pick to open it.
+  /// Planning stakes each pick (10 XP) — previewed in the card below.
+  Future<void> _planDay() async {
+    if (_planning) return;
+    setState(() => _planning = true);
+    try {
+      final picks = await AiClient().plan([..._todo, ..._prog]);
+      if (!mounted) return;
+      setState(() {
+        _picks = picks;
+        _plannedOnce = true;
+        _staked = false;
+      });
+      AppHaptics.tap();
+      _saveLastPlan(picks.map((p) => p.id).toList());
+      _syncPlanWidget();
+      // Peak hour annotates the plan; failure keeps the plan as-is.
+      try {
+        final ins = await _api.fetchInsights();
+        if (!mounted || ins.hours.isEmpty) return;
+        final peak =
+            ins.hours.reduce((a, b) => a['n']! >= b['n']! ? a : b);
+        if (mounted) setState(() => _peakHour = peak['h']);
+      } catch (_) {}
+    } finally {
+      if (mounted) setState(() => _planning = false);
+    }
+  }
+
+  /// Time-block export: today's picks as back-to-back calendar events
+  /// starting at the peak hour. Same no-SDK .ics file as Settings.
+  Future<void> _exportPlan() async {
+    if (_picks.isEmpty) return;
+    if (kIsWeb) {
+      showBloomSnackBar(
+          context, 'Calendar files need the mobile or desktop app.');
+      return;
+    }
+    final all = {for (final t in [..._todo, ..._prog, ..._done]) t.id: t};
+    final blocks = [
+      for (final p in _picks)
+        if (all.containsKey(p.id))
+          PlanBlock(
+              id: p.id,
+              title: all[p.id]!.title,
+              minutes: estimatedMinutes(all[p.id]!)),
+    ];
+    if (blocks.isEmpty || !mounted) return;
+    try {
+      final file =
+          await File('${Directory.systemTemp.path}/bloom-today.ics')
+              .writeAsString(
+                  buildPlanBlocks(blocks, startHour: _peakHour ?? 9));
+      await SharePlus.instance.share(
+        ShareParams(
+          files: [XFile(file.path, mimeType: 'text/calendar')],
+          text: "Today's plan",
+        ),
+      );
+    } catch (_) {
+      if (mounted) showBloomSnackBar(context, 'Calendar export failed.');
+    }
+  }
+
+  static const _kHabitNudgeDay = 'bloom_habit_nudge_day';
+
+  static String _dayString([DateTime? d]) {
+    final n = d ?? DateTime.now();
+    return '${n.year.toString().padLeft(4, '0')}-${n.month.toString().padLeft(2, '0')}-${n.day.toString().padLeft(2, '0')}';
+  }
+
+  /// At-risk habit nudge: longest living streak ending tonight gets one
+  /// quiet line with a one-tap save. Once a day, never a list, never a nag.
+  Future<void> _maybeHabitNudge() async {
+    try {
+      await HabitStore.instance.load();
+      final atRisk = HabitStore.atRisk(HabitStore.instance.habits);
+      if (atRisk.isEmpty || !mounted) return;
+      final prefs = await SharedPreferences.getInstance();
+      final today = _dayString();
+      if (prefs.getString(_kHabitNudgeDay) == today) return;
+      await prefs.setString(_kHabitNudgeDay, today);
+      if (!mounted) return;
+      final h = atRisk.first;
+      showBloomSnackBar(
+        context,
+        '“${h.name}” streak (${h.streak}d) ends tonight — 5 min keeps it.',
+        actionLabel: 'Keep it',
+        onAction: () async {
+          await HabitStore.instance.toggleToday(h.id);
+        },
+      );
+    } catch (_) {}
+  }
+
+  /// Planner header action: past 8pm with a plan done, the most useful
+  /// thing is the review — otherwise (re)plan the day.
+  void _plannerAction() {
+    if (_planning) return;
+    if (_plannedOnce && DateTime.now().hour >= 20) {
+      Navigator.of(context).push(
+        SakuraPageRoute(builder: (_) => const ReviewScreen()),
+      );
+      return;
+    }
+    _planDay();
+  }
+
+  /// Explicit stake opt-in: arm tonight's settle for the current picks.
+  /// Nothing is risked until the user taps this.
+  void _stake() {
+    if (_planning || _picks.isEmpty) return;
+    GamificationStateNotifier.instance
+        .stakeDay(_picks.map((p) => p.id).toList());
+    setState(() => _staked = true);
+    AppHaptics.tap();
+  }
+
+  /// Morning settle: if yesterday had a stake, compare it against current
+  /// statuses and wilt the unfinished (capped, never a level). Runs once —
+  /// settle clears the stake. Fresh-data path only; offline keeps it pending.
+  void _settleStakes() {
+    final game = GamificationStateNotifier.instance;
+    final stakedDay = game.stakedDayIso;
+    if (stakedDay == null) return;
+    final today =
+        '${DateTime.now().year.toString().padLeft(4, '0')}-${DateTime.now().month.toString().padLeft(2, '0')}-${DateTime.now().day.toString().padLeft(2, '0')}';
+    if (stakedDay == today) return;
+    final repo = TaskRepository.instance;
+    final existing = repo.tasks.map((t) => t.id).toSet();
+    final done = repo.doneTasks.map((t) => t.id).toSet();
+    final result = game.settleDay(done, existing);
+    if (!mounted) return;
+    if (result.rested) {
+      showBloomSnackBar(
+          context, 'Tired week — tonight was free. Fresh start tomorrow.');
+    } else if (result.lost > 0) {
+      showBloomSnackBar(context,
+          'Yesterday wilted −${result.lost} XP · ${result.kept} kept — today is fresh.');
+    } else if (result.kept > 0) {
+      showBloomSnackBar(context, 'Clean sweep — nothing wilted.');
+    }
   }
 
   Future<void> _syncIntention() async {
@@ -316,7 +787,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
   void _claimBloom() {
     // Gather thump: the reward moment gets the heavier buzz.
-    HapticFeedback.mediumImpact();
+    AppHaptics.confirm();
     final reward = GamificationStateNotifier.instance.claimDailyRitual();
     MysteryBloomOverlay.show(context, reward: reward);
   }
@@ -418,29 +889,490 @@ class _HomeScreenState extends State<HomeScreen> {
   /// cards into one glance, freeing vertical room so "Today's Flow" lands
   /// in the primary viewport on phones.
   Widget _bentoHeader() {
-    return SizedBox(
-      key: const ValueKey('home_hud_card'),
-      height: 130,
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
+    // Responsive: narrow phones stack focus OVER level (full-width cells
+    // so nothing ellipsises); wide screens keep the compact side-by-side
+    // ~130px bento band.
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final narrow = constraints.maxWidth < 520;
+        if (narrow) {
+          return Column(
+            key: const ValueKey('home_hud_card'),
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              DailyIntentionCard(
+                compact: true,
+                onTargetMet: _claimBloom,
+              ),
+              const SizedBox(height: 10),
+              _GameHud(onBloom: _claimBloom),
+            ],
+          );
+        }
+        return SizedBox(
+          key: const ValueKey('home_hud_card'),
+          height: 130,
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Expanded(
+                // 5:4 (was 3:2): the seedling cell needs ~140px on a 360px
+                // phone for rank/streak text beside the badge — at 3:2 its
+                // text column collapsed to ~48px and ellipsised every rank.
+                flex: 5,
+                child: DailyIntentionCard(
+                  compact: true,
+                  onTargetMet: _claimBloom,
+                ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                flex: 4,
+                child: _GameHud(onBloom: _claimBloom),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  /// AI day planner card: "Plan my day" ranks open tasks (server
+  /// Flash-Lite, local fallback offline). Picks open their task on tap.
+  Widget _plannerCard() {
+    return Container(
+      key: const ValueKey('home_plan_card'),
+      padding: const EdgeInsets.fromLTRB(16, 14, 16, 12),
+      decoration: SakuraTheme.cardDecoration(),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
         children: [
-          Expanded(
-            // 5:4 (was 3:2): the seedling cell needs ~140px on a 360px
-            // phone for rank/streak text beside the badge — at 3:2 its
-            // text column collapsed to ~48px and ellipsised every rank.
-            flex: 5,
-            child: DailyIntentionCard(
-              compact: true,
-              onTargetMet: _claimBloom,
+          Row(
+            children: [
+              Icon(LucideIcons.sparkles,
+                  size: 13, color: SakuraColors.primary),
+              const SizedBox(width: 6),
+              Expanded(
+                child: Text(
+                  "TODAY'S PLAN",
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontSize: 10,
+                    letterSpacing: 1.6,
+                    fontWeight: FontWeight.w600,
+                    color: SakuraColors.inkFaint,
+                  ),
+                ),
+              ),
+              const SizedBox(width: 8),
+              GestureDetector(
+                onTap: _planning ? null : _plannerAction,
+                behavior: HitTestBehavior.opaque,
+                child: Text(
+                  _planning
+                      ? 'Thinking…'
+                      : _plannedOnce && DateTime.now().hour >= 20
+                          ? 'Review today'
+                          : _plannedOnce
+                              ? 'Refresh'
+                              : 'Plan my day',
+                  style: TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w800,
+                    color: SakuraColors.primary,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          // Stake preview + wilt status: the one line that makes the
+          // consequences legible before and after the night.
+          ListenableBuilder(
+            listenable: GamificationStateNotifier.instance,
+            builder: (context, _) {
+              final game = GamificationStateNotifier.instance;
+              final staked = game.stakedIds.length;
+              if (game.wilted && game.lastStakeLoss > 0) {
+                return Padding(
+                  padding: const EdgeInsets.only(bottom: 6),
+                  child: Text(
+                    'Yesterday wilted −${game.lastStakeLoss} XP — today is fresh.',
+                    style: TextStyle(
+                        fontSize: 11.5, color: SakuraColors.primary),
+                  ),
+                );
+              }
+              if (_staked && staked > 0) {
+                if (game.wiltStreak >= 2) {
+                  return Padding(
+                    padding: const EdgeInsets.only(bottom: 6),
+                    child: Text(
+                      'Tired week — tonight is on the house, no stakes.',
+                      style: TextStyle(
+                          fontSize: 11.5,
+                          color: SakuraColors.inkSoft),
+                    ),
+                  );
+                }
+                return Padding(
+                  padding: const EdgeInsets.only(bottom: 6),
+                  child: Text(
+                    '$staked at stake · ${BloomEngine.stakePerTask} XP each — finish by midnight.',
+                    style: TextStyle(
+                        fontSize: 11.5, color: SakuraColors.inkSoft),
+                  ),
+                );
+              }
+              return const SizedBox.shrink();
+            },
+          ),
+          // Opt-in row: planning is free; staking is an explicit choice.
+          if (_plannedOnce && !_staked && _picks.isNotEmpty)
+            GestureDetector(
+              onTap: _planning ? null : _stake,
+              behavior: HitTestBehavior.opaque,
+              child: Padding(
+                padding: const EdgeInsets.only(bottom: 8),
+                child: Row(
+                  children: [
+                    Icon(LucideIcons.shieldPlus,
+                        size: 12, color: SakuraColors.primary),
+                    const SizedBox(width: 6),
+                    Expanded(
+                      child: Text(
+                        'Feeling it? Stake ${BloomEngine.stakePerTask} XP each — finish by midnight.',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          fontSize: 11.5,
+                          fontWeight: FontWeight.w600,
+                          color: SakuraColors.primary,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
             ),
-          ),
-          const SizedBox(width: 10),
-          Expanded(
-            flex: 4,
-            child: _GameHud(onBloom: _claimBloom),
-          ),
+          if (!_plannedOnce && _carry.isNotEmpty)
+            GestureDetector(
+              onTap: _planning ? null : _planCarry,
+              behavior: HitTestBehavior.opaque,
+              child: Padding(
+                padding: const EdgeInsets.only(bottom: 8),
+                child: Row(
+                  children: [
+                    Icon(LucideIcons.history,
+                        size: 12, color: SakuraColors.primary),
+                    const SizedBox(width: 6),
+                    Expanded(
+                      child: Text(
+                        'Yesterday left ${_carry.length} unfinished — re-plan first?',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          fontSize: 11.5,
+                          fontWeight: FontWeight.w600,
+                          color: SakuraColors.primary,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          if (!_plannedOnce)
+            Text(
+              'Overdue, due-soon and high-priority first — tap Plan my day.',
+              style: TextStyle(fontSize: 12.5, color: SakuraColors.inkSoft),
+            )
+          else if (_picks.isEmpty)
+            Text(
+              'Nothing open — enjoy the quiet.',
+              style: TextStyle(fontSize: 12.5, color: SakuraColors.inkSoft),
+            )
+          else
+            for (var i = 0; i < _picks.length; i++)
+              GestureDetector(
+                onTap: () {
+                  final t = _findTask(_picks[i].id);
+                  if (t != null) _openDetail(t);
+                },
+                behavior: HitTestBehavior.opaque,
+                child: Padding(
+                  padding: EdgeInsets.only(
+                      top: i == 0 ? 2 : 8, bottom: i == _picks.length - 1 ? 2 : 0),
+                  child: Row(
+                    children: [
+                      Container(
+                        width: 22,
+                        height: 22,
+                        alignment: Alignment.center,
+                        decoration: BoxDecoration(
+                          color: SakuraColors.primary
+                              .withValues(alpha: 0.12),
+                          shape: BoxShape.circle,
+                        ),
+                        child: Text(
+                          '${i + 1}',
+                          style: TextStyle(
+                            fontSize: 11,
+                            fontWeight: FontWeight.w800,
+                            color: SakuraColors.primary,
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Text(
+                              _picks[i].title,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(
+                                fontSize: 13.5,
+                                fontWeight: FontWeight.w700,
+                                color: SakuraColors.ink,
+                              ),
+                            ),
+                            Text(
+                              _picks[i].reason,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(
+                                fontSize: 11,
+                                color: SakuraColors.inkSoft,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      ListenableBuilder(
+                        listenable: EnergyStore.instance,
+                        builder: (context, _) {
+                          final level = EnergyStore.instance
+                              .levelFor(_picks[i].id);
+                          if (level == null) {
+                            return const SizedBox.shrink();
+                          }
+                          return Padding(
+                            padding: const EdgeInsets.only(left: 6),
+                            child: Container(
+                              padding:
+                                  const EdgeInsets.symmetric(
+                                      horizontal: 7, vertical: 3),
+                              decoration: BoxDecoration(
+                                color: SakuraColors.primary
+                                    .withValues(alpha: 0.10),
+                                borderRadius:
+                                    BorderRadius.circular(8),
+                              ),
+                              child: Text(
+                                energyLabel(level),
+                                style: TextStyle(
+                                  fontSize: 10,
+                                  fontWeight: FontWeight.w700,
+                                  color: SakuraColors.primary,
+                                ),
+                              ),
+                            ),
+                          );
+                        },
+                      ),
+                      Icon(LucideIcons.chevronRight,
+                          size: 15, color: SakuraColors.inkFaint),
+                    ],
+                  ),
+                ),
+              ),
+          if (_plannedOnce && _picks.isNotEmpty)
+            Builder(builder: (context) {
+              final total = planDayTotalMinutes(
+                  [..._todo, ..._prog, ..._done], _picks);
+              final heavy = total > 120;
+              final peak = _peakHour;
+              return Padding(
+                padding: const EdgeInsets.only(top: 8),
+                child: Text(
+                  '≈ ${fmtLoad(total)} across top ${_picks.length}${peak != null ? ' · peak $peak:00 — tackle #1 then' : ''}${heavy ? ' · heavy day — consider deferring one' : ' · fits a calm day'}',
+                  style: TextStyle(
+                      fontSize: 11.5,
+                      color: heavy
+                          ? SakuraColors.primary
+                          : SakuraColors.inkSoft),
+                ),
+              );
+            }),
+          Builder(builder: (context) {
+            final repeats =
+                repeatCandidates([..._todo, ..._prog], _done);
+            if (repeats.isEmpty) return const SizedBox.shrink();
+            final r = repeats.first;
+            final name = r.task.title.length > 34
+                ? '${r.task.title.substring(0, 34)}…'
+                : r.task.title;
+            return GestureDetector(
+              onTap: () async {
+                final messenger = ScaffoldMessenger.of(context);
+                await TaskRepository.instance
+                    .updateTask(r.task.id, recurring: 'weekly');
+                await _refresh();
+                if (!mounted) return;
+                messenger.hideCurrentSnackBar();
+                messenger.showSnackBar(
+                  SnackBar(content: Text('“$name” repeats weekly now.')),
+                );
+              },
+              behavior: HitTestBehavior.opaque,
+              child: Padding(
+                padding: const EdgeInsets.only(top: 8),
+                child: Row(
+                  children: [
+                    Icon(LucideIcons.repeat,
+                        size: 12, color: SakuraColors.primary),
+                    const SizedBox(width: 6),
+                    Expanded(
+                      child: Text(
+                        '“$name” done ${r.times}x — repeat weekly?',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          fontSize: 11.5,
+                          fontWeight: FontWeight.w600,
+                          color: SakuraColors.primary,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            );
+          }),
+          if (_plannedOnce && _picks.isNotEmpty)
+            GestureDetector(
+              onTap: _exportPlan,
+              behavior: HitTestBehavior.opaque,
+              child: Padding(
+                padding: const EdgeInsets.only(top: 8),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(
+                      LucideIcons.calendarPlus,
+                      size: 12,
+                      color: SakuraColors.primary,
+                    ),
+                    const SizedBox(width: 6),
+                    Text(
+                      'Add to calendar (.ics)',
+                      style: TextStyle(
+                        fontSize: 11.5,
+                        fontWeight: FontWeight.w600,
+                        color: SakuraColors.primary,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          if ((_todo.length + _prog.length) >= 15)
+            GestureDetector(
+              onTap: _planning ? null : _groom,
+              behavior: HitTestBehavior.opaque,
+              child: Padding(
+                padding: const EdgeInsets.only(top: 10),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(
+                      LucideIcons.broom,
+                      size: 12,
+                      color: SakuraColors.inkFaint,
+                    ),
+                    const SizedBox(width: 6),
+                    Text(
+                      'Pile growing? Tidy it…',
+                      style: TextStyle(
+                        fontSize: 11.5,
+                        fontWeight: FontWeight.w600,
+                        color: SakuraColors.inkSoft,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
         ],
       ),
+    );
+  }
+
+  /// 12-week evidence grid behind a disclosure: collapsed by default so
+  /// today's work owns the first viewport; the grid keeps its state
+  /// while hidden (maintainState) so collapsing never refetches.
+  Widget _collapsibleHeat() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        GestureDetector(
+          onTap: () => setState(() => _heatExpanded = !_heatExpanded),
+          behavior: HitTestBehavior.opaque,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(vertical: 4),
+            child: Row(
+              children: [
+                Text(
+                  '12-WEEK EVIDENCE',
+                  style: TextStyle(
+                    fontSize: 11,
+                    letterSpacing: 2.2,
+                    fontWeight: FontWeight.w600,
+                    color: SakuraColors.inkFaint,
+                  ),
+                ),
+                const Spacer(),
+                Text(
+                  _heatExpanded ? 'Hide' : 'Show',
+                  style: TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w700,
+                    color: SakuraColors.primary,
+                  ),
+                ),
+                const SizedBox(width: 4),
+                Icon(
+                  _heatExpanded
+                      ? LucideIcons.chevronUp
+                      : LucideIcons.chevronDown,
+                  size: 15,
+                  color: SakuraColors.primary,
+                ),
+              ],
+            ),
+          ),
+        ),
+        Visibility(
+          visible: _heatExpanded,
+          maintainState: true,
+          maintainAnimation: false,
+          maintainSize: false,
+          child: Padding(
+            padding: const EdgeInsets.only(top: 8),
+            child: ContributionHeatmap(
+              days: _heat,
+              bestStreakLabel: _streakLabel,
+            ),
+          ),
+        ),
+      ],
     );
   }
 
@@ -471,32 +1403,8 @@ class _HomeScreenState extends State<HomeScreen> {
             ),
           ),
           const SliverToBoxAdapter(child: SizedBox(height: 12)),
-          // Evidence sits above the work: the heat map reads as what the
-          // committed tasks grew into.
-          SliverToBoxAdapter(
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 20),
-              child: ContributionHeatmap(
-                days: _heat,
-                bestStreakLabel: _streakLabel,
-              ),
-            ),
-          ),
-          const SliverToBoxAdapter(child: SizedBox(height: 12)),
-          // Doors to review (Board / History / Insights / Review).
-          SliverList(
-            delegate: SliverChildBuilderDelegate(
-              (context, i) => Padding(
-                key: ValueKey('home_quick_link_$i'),
-                padding: const EdgeInsets.symmetric(horizontal: 20),
-                child: _QuickLinks.rowItem(i, context),
-              ),
-              childCount: 4,
-            ),
-          ),
-          const SliverToBoxAdapter(child: SizedBox(height: 12)),
-          // Today's Flow last: the board is the day's work, reached after
-          // the header, evidence and doors above it.
+          // Today's Flow FIRST: the work owns the first viewport, right
+          // under the header. Metrics and doors moved below it.
           SliverToBoxAdapter(
             child: Padding(
               padding: const EdgeInsets.symmetric(horizontal: 20),
@@ -526,6 +1434,32 @@ class _HomeScreenState extends State<HomeScreen> {
                 ),
               ),
             ),
+          SliverToBoxAdapter(
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 20),
+              child: _plannerCard(),
+            ),
+          ),
+          const SliverToBoxAdapter(child: SizedBox(height: 12)),
+          // Evidence below the work, collapsed until asked for.
+          SliverToBoxAdapter(
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 20),
+              child: _collapsibleHeat(),
+            ),
+          ),
+          const SliverToBoxAdapter(child: SizedBox(height: 12)),
+          // Doors to review (Board / History / Insights / Review).
+          SliverList(
+            delegate: SliverChildBuilderDelegate(
+              (context, i) => Padding(
+                key: ValueKey('home_quick_link_$i'),
+                padding: const EdgeInsets.symmetric(horizontal: 20),
+                child: _QuickLinks.rowItem(i, context),
+              ),
+              childCount: 4,
+            ),
+          ),
           const SliverToBoxAdapter(child: SizedBox(height: 24)),
         ],
       ),
@@ -561,21 +1495,7 @@ class _HomeScreenState extends State<HomeScreen> {
               child: Container(key: _intentionKey, child: _bentoHeader()),
             ),
             const SizedBox(height: 12),
-            // Evidence above the work — same order as mobile.
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 20),
-              child: ContributionHeatmap(
-                days: _heat,
-                bestStreakLabel: _streakLabel,
-              ),
-            ),
-            const SizedBox(height: 12),
-            const Padding(
-              padding: EdgeInsets.symmetric(horizontal: 20),
-              child: _QuickLinks(key: ValueKey('home_quick_links')),
-            ),
-            const SizedBox(height: 12),
-            // Today's Flow last.
+            // Today's Flow FIRST: the work owns the first viewport.
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 20),
               child: Container(
@@ -592,7 +1512,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 ),
               ),
             ),
-            const SizedBox(height: 12),
+            const SizedBox(height: 8),
             if (_showGuide)
               Padding(
                 padding: const EdgeInsets.fromLTRB(20, 0, 20, 12),
@@ -601,6 +1521,21 @@ class _HomeScreenState extends State<HomeScreen> {
                   creating: _creatingSample,
                 ),
               ),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 20),
+              child: _plannerCard(),
+            ),
+            const SizedBox(height: 12),
+            // Evidence below the work, collapsed until asked for.
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 20),
+              child: _collapsibleHeat(),
+            ),
+            const SizedBox(height: 12),
+            const Padding(
+              padding: EdgeInsets.symmetric(horizontal: 20),
+              child: _QuickLinks(key: ValueKey('home_quick_links')),
+            ),
             const SizedBox(height: 24),
           ],
         ),
@@ -618,42 +1553,58 @@ class _SyncBanner extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Row(
-          mainAxisAlignment: MainAxisAlignment.end,
+    // Queued-mutation count rides the pill: on flaky networks the user
+    // sees "2 queued" instead of wondering where their task went.
+    return ListenableBuilder(
+      listenable: TaskRepository.instance,
+      builder: (context, _) {
+        final pending = TaskRepository.instance.pendingMutations;
+        final label = live
+            ? (pending > 0 ? '● live db · $pending queued' : '● live db')
+            : (pending > 0 ? '○ offline · $pending queued' : '○ offline');
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Container(
-              padding:
-                  const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-              decoration: BoxDecoration(
-                // Theme-native states: tinted brand when live, quiet
-                // surface when offline — no pastel hardcodes glowing in
-                // Midnight. Matches the app-bar pill language.
-                color: live ? SakuraColors.primarySoft : SakuraColors.surface,
-                borderRadius: BorderRadius.circular(10),
-                border: Border.all(color: SakuraColors.cardBorder),
-              ),
-              child: Text(
-                live ? '● live db' : '○ offline',
-                style: TextStyle(
-                  fontSize: 10,
-                  fontWeight: FontWeight.w700,
-                  color: live ? SakuraColors.primary : SakuraColors.inkSoft,
+            Row(
+              mainAxisAlignment: MainAxisAlignment.end,
+              children: [
+                Container(
+                  padding: const EdgeInsets.symmetric(
+                      horizontal: 8, vertical: 4),
+                  decoration: BoxDecoration(
+                    // Theme-native states: tinted brand when live, quiet
+                    // surface when offline — no pastel hardcodes glowing in
+                    // Midnight. Matches the app-bar pill language.
+                    color: live
+                        ? SakuraColors.primarySoft
+                        : SakuraColors.surface,
+                    borderRadius: BorderRadius.circular(10),
+                    border: Border.all(color: SakuraColors.cardBorder),
+                  ),
+                  child: Text(
+                    label,
+                    style: TextStyle(
+                      fontSize: 10,
+                      fontWeight: FontWeight.w700,
+                      color: live
+                          ? SakuraColors.primary
+                          : SakuraColors.inkSoft,
+                    ),
+                  ),
                 ),
-              ),
+              ],
             ),
+            if (note != null)
+              Padding(
+                padding:
+                    const EdgeInsets.only(top: 6, left: 20, right: 20),
+                child: Text(note!,
+                    style: TextStyle(
+                        fontSize: 11, color: SakuraColors.inkSoft)),
+              ),
           ],
-        ),
-        if (note != null)
-          Padding(
-            padding: const EdgeInsets.only(top: 6, left: 20, right: 20),
-            child: Text(note!,
-                style:
-                    TextStyle(fontSize: 11, color: SakuraColors.inkSoft)),
-          ),
-      ],
+        );
+      },
     );
   }
 }
@@ -768,7 +1719,7 @@ class _GameHud extends StatelessWidget {
             children: [
               Row(
                 children: [
-                  BloomRankBadge(level: game.level, size: 42, showLabel: false),
+                  BloomRankBadge(level: game.level, size: 42, showLabel: false, wilted: game.wilted),
                   const SizedBox(width: 8),
                   Expanded(
                     child: Column(

@@ -1,12 +1,19 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
+import 'package:home_widget/home_widget.dart';
 import 'package:lucide_flutter/lucide_flutter.dart';
 
 import '../data/focus_controller.dart';
+import '../data/mock_data.dart';
+import '../data/plan_widget.dart';
+import '../data/reminders.dart';
 import '../data/task_repository.dart';
 import '../game/game.dart';
 import '../theme/app_motion.dart';
 import '../theme/sakura_theme.dart';
 import '../widgets/focus_mini_player.dart';
+import '../widgets/motion.dart';
 import '../widgets/quick_add_ritual_sheet.dart';
 import '../widgets/quick_add_task_sheet.dart';
 import '../widgets/sakura_bottom_nav.dart';
@@ -15,6 +22,7 @@ import 'folders_screen.dart';
 import 'home_screen.dart';
 import 'insights_hub_screen.dart';
 import 'rituals_hub_screen.dart';
+import 'task_detail_screen.dart';
 
 /// Root shell — owns the 4-tab BottomNav, the contextual "plant" FAB and
 /// the page stack.
@@ -45,14 +53,54 @@ class _AppShellState extends State<AppShell>
   /// burst instead of 4 parallel bursts on login).
   final Set<int> _visited = {0};
 
+  /// Home-screen widget taps (`dailybloom://` URIs, cold + warm).
+  StreamSubscription<Uri?>? _widgetClicks;
+
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    // Cold start via widget tap: route once the first frame lands.
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      final uri = await PlanWidgetBridge.initialLaunchUri();
+      _openWidgetUri(PlanWidgetBridge.parsePlanWidgetUri(uri));
+      _drainNotifTask();
+    });
+    // Warm taps while the shell is alive.
+    _widgetClicks = HomeWidget.widgetClicked.listen(
+      (uri) => _openWidgetUri(PlanWidgetBridge.parsePlanWidgetUri(uri)),
+      onError: (_) {},
+    );
+  }
+
+  /// Route a widget tap: task deep-link opens its detail, plan jumps to
+  /// Today. Unknown ids land on Today — never a dead tap.
+  void _openWidgetUri(({String type, String? id})? target) {
+    if (target == null || !mounted) return;
+    if (target.type == 'plan' || target.id == null) {
+      _go(0);
+      return;
+    }
+    Task? found;
+    try {
+      found = TaskRepository.instance.tasks
+          .firstWhere((t) => t.id == target.id);
+    } catch (_) {
+      found = null;
+    }
+    if (!mounted) return;
+    if (found == null) {
+      _go(0);
+      return;
+    }
+    Navigator.of(context).push(
+      SakuraPageRoute(builder: (_) => TaskDetailScreen(task: found!)),
+    );
   }
 
   @override
   void dispose() {
+    _widgetClicks?.cancel();
     WidgetsBinding.instance.removeObserver(this);
     super.dispose();
   }
@@ -63,7 +111,26 @@ class _AppShellState extends State<AppShell>
     // queued while the app was backgrounded/offline.
     if (state == AppLifecycleState.resumed) {
       TaskRepository.instance.syncNow();
+      // A due-date tap may have launched us: deep-link its task.
+      _drainNotifTask();
     }
+  }
+
+  /// Open the task behind a due-date notification tap, if any is stashed.
+  Future<void> _drainNotifTask() async {
+    final id = await ReminderService.drainNotifTask();
+    if (id == null || !mounted) return;
+    Task? found;
+    try {
+      found =
+          TaskRepository.instance.tasks.firstWhere((t) => t.id == id);
+    } catch (_) {
+      found = null;
+    }
+    if (found == null || !mounted) return;
+    Navigator.of(context).push(
+      SakuraPageRoute(builder: (_) => TaskDetailScreen(task: found!)),
+    );
   }
 
   void _go(int i) {

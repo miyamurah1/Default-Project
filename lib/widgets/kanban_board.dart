@@ -8,6 +8,8 @@ import '../game/bloom_game_colors.dart';
 import '../theme/app_motion.dart';
 import '../theme/sakura_theme.dart';
 import 'bloom_dialog.dart';
+import 'bloom_sheet.dart';
+import 'bloom_snackbar.dart';
 import 'motion.dart';
 import 'task_card.dart';
 
@@ -66,7 +68,11 @@ class KanbanBoard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    if (tabsOnly) return _narrow();
+    // Urgent float: overdue + due-today rise to the top of TO-DO on
+    // every layout (wide columns and phone tabs alike). Stable inside
+    // each band, so manual position order is never scrambled.
+    final floatedTodo = floatUrgent(todo);
+    if (tabsOnly) return _narrow(floatedTodo);
     return LayoutBuilder(
       builder: (context, constraints) {
         if (constraints.maxWidth >= breakpoint) {
@@ -75,7 +81,7 @@ class KanbanBoard extends StatelessWidget {
             children: [
               _BoardColumn(
                 label: 'TO-DO',
-                tasks: todo,
+                tasks: floatedTodo,
                 accent: SakuraColors.primary,
                 onTap: onTap,
                 onOpen: onOpen,
@@ -111,15 +117,15 @@ class KanbanBoard extends StatelessWidget {
           if (expand) return row;
           return SizedBox(height: boardHeight, child: row);
         }
-        return _narrow();
+        return _narrow(floatedTodo);
       },
     );
   }
 
   /// Segmented tab view (phones, and Home on all widths).
-  Widget _narrow() {
+  Widget _narrow([List<Task>? floatedTodo]) {
     return _NarrowTabs(
-      todo: todo,
+      todo: floatedTodo ?? todo,
       progress: progress,
       done: done,
       onTap: onTap,
@@ -438,6 +444,9 @@ class _TaskList extends StatelessWidget {
       this.scrollable = false,
       this.heroPrefix});
 
+  /// Delete with a 4s UNDO window (habit-deletion pattern): the backup
+  /// task + subtask titles are captured before the delete, and UNDO
+  /// re-plants them (fresh server ids) with status restored.
   Future<bool> _confirmDelete(BuildContext context, Task t) async {
     final yes = await showBloomConfirm(
       context,
@@ -446,8 +455,35 @@ class _TaskList extends StatelessWidget {
           '"${t.title}" and its subtasks, notes and history go with it.',
       cancelLabel: 'Keep',
     );
-    if (yes) await TaskRepository.instance.deleteTask(t.id);
-    return yes;
+    if (!yes) return false;
+    final backupSubs =
+        t.subtasks?.map((s) => s.title).toList() ?? const <String>[];
+    await TaskRepository.instance.deleteTask(t.id);
+    if (!context.mounted) return true;
+    showBloomSnackBar(
+      context,
+      'Deleted "${t.title}".',
+      duration: const Duration(seconds: 4),
+      actionLabel: 'UNDO',
+      onAction: () async {
+        final restored = await TaskRepository.instance.createTask(
+          title: t.title,
+          folder: t.folder,
+          tag: t.tag,
+          description: t.description,
+          priority: t.priority,
+          recurring: t.recurring,
+          dueAt: t.dueAt,
+        );
+        if (t.status != 'todo') {
+          await TaskRepository.instance.moveTask(restored.id, t.status);
+        }
+        for (final st in backupSubs) {
+          await TaskRepository.instance.createSubtask(restored.id, st);
+        }
+      },
+    );
+    return true;
   }
 
   Future<void> _setDue(Task t, DateTime due) =>
@@ -466,31 +502,19 @@ class _TaskList extends StatelessWidget {
 
   /// Long-press quick menu: reschedule or delete without opening detail.
   Future<void> _showMenu(BuildContext context, Task t) async {
-    await showModalBottomSheet<void>(
-      context: context,
-      backgroundColor: SakuraColors.surface,
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
-      ),
-      builder: (ctx) => SafeArea(
+    await showBloomSheet<void>(
+      context,
+      SafeArea(
+        top: false,
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            const SizedBox(height: 10),
-            Container(
-              width: 42,
-              height: 4,
-              decoration: BoxDecoration(
-                color: SakuraColors.cardBorder,
-                borderRadius: BorderRadius.circular(2),
-              ),
-            ),
-            const SizedBox(height: 10),
+            const SizedBox(height: 6),
             _MenuAction(
               icon: LucideIcons.calendarCheck,
               label: 'Due today',
               onTap: () {
-                Navigator.of(ctx).pop();
+                Navigator.of(context).pop();
                 _setDue(t, DateTime.now());
               },
             ),
@@ -498,7 +522,7 @@ class _TaskList extends StatelessWidget {
               icon: LucideIcons.calendarPlus,
               label: 'Due tomorrow',
               onTap: () {
-                Navigator.of(ctx).pop();
+                Navigator.of(context).pop();
                 _setDue(t, DateTime.now().add(const Duration(days: 1)));
               },
             ),
@@ -506,7 +530,7 @@ class _TaskList extends StatelessWidget {
               icon: LucideIcons.calendarDays,
               label: 'Set date…',
               onTap: () {
-                Navigator.of(ctx).pop();
+                Navigator.of(context).pop();
                 _pickDate(context, t);
               },
             ),
@@ -515,7 +539,7 @@ class _TaskList extends StatelessWidget {
               label: 'Delete',
               danger: true,
               onTap: () {
-                Navigator.of(ctx).pop();
+                Navigator.of(context).pop();
                 _confirmDelete(context, t);
               },
             ),
@@ -626,6 +650,8 @@ class _TaskList extends StatelessWidget {
           return _confirmDelete(context, task);
         },
         child: Entrance(
+          key: ValueKey('entrance_${task.id}'),
+          onceKey: 'kanban-${task.id}',
           delayMs: index < 6 ? (index * 60).clamp(0, 300) : 0,
           child: TaskCard(
             task: task,

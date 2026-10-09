@@ -269,6 +269,18 @@ class HabitStore extends ChangeNotifier {
     }
     return run;
   }
+
+  /// Habits whose streak dies tonight: streak alive, not done today,
+  /// not paused. Longest streak first, max 3 — one quiet nudge, not a list.
+  static List<Habit> atRisk(Iterable<Habit> habits, [DateTime? now]) {
+    final n = now ?? DateTime.now();
+    final today = dayKey(n);
+    final out = habits
+        .where((h) => !h.paused && h.streak > 0 && !h.doneOn(today))
+        .toList()
+      ..sort((a, b) => b.streak.compareTo(a.streak));
+    return out.take(3).toList();
+  }
   static int _idSeq = 0;
   // Monotonic suffix: two rows created in the same microsecond (preset
   // apply, fast test clocks) must never share an id — keys collide.

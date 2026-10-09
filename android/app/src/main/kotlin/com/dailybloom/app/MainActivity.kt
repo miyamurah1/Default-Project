@@ -1,4 +1,4 @@
-package com.example.daily_bloom
+package com.dailybloom.app
 
 import io.flutter.embedding.android.FlutterActivity
 

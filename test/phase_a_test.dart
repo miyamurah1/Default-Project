@@ -7,14 +7,15 @@ import 'package:daily_bloom/data/focus_controller.dart' show formatCountdown;
 import 'package:daily_bloom/data/mock_data.dart';
 
 void main() {
-  test('nextStatus resumes to progress, completes to done', () {
+  test('nextStatus loops done back to todo, completes to done', () {
     const todo = Task(id: 't', title: 'T', tag: 'G', status: 'todo');
     const prog = Task(id: 'p', title: 'P', tag: 'G', status: 'in_progress');
     const done = Task(id: 'd', title: 'D', tag: 'G', status: 'done');
     expect(nextStatus(todo), 'done');
     expect(nextStatus(prog), 'done');
-    // Reopening resumes work — never back to the To-Do pile.
-    expect(nextStatus(done), 'in_progress');
+    // Reopening returns to the To-Do pile — never straight into
+    // In Progress, which would silently break the WIP limit.
+    expect(nextStatus(done), 'todo');
   });
   test('TaskEvent parses a status move', () {
     final e = TaskEvent.fromJson({

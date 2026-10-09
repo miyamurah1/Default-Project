@@ -1,15 +1,18 @@
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:intl/intl.dart';
 import 'package:lucide_flutter/lucide_flutter.dart';
 
+import '../data/ai_client.dart';
 import '../data/api_client.dart';
 import '../data/auth_store.dart';
 import '../data/energy_store.dart';
+import '../data/haptics.dart';
 import '../data/mock_data.dart';
 import '../data/task_repository.dart';
 import '../theme/sakura_theme.dart';
 import '../widgets/bloom_dialog.dart';
+import '../widgets/bloom_sheet.dart';
+import '../widgets/bloom_snackbar.dart';
 import '../widgets/motion.dart';
 import '../widgets/timeline_rail.dart';
 import 'focus_timer_screen.dart';
@@ -73,6 +76,7 @@ class _TaskDetailScreenState extends State<TaskDetailScreen> {
   final _repo = TaskRepository.instance;
   final _subCtrl = TextEditingController();
   final _noteCtrl = TextEditingController();
+  final _descCtrl = TextEditingController();
 
   late Task _task;
   List<Subtask> _subs = [];
@@ -81,19 +85,62 @@ class _TaskDetailScreenState extends State<TaskDetailScreen> {
   bool _loading = true;
   bool _savingSub = false;
   bool _savingNote = false;
+  bool _breaking = false;
+  bool _descDirty = false;
+  bool _savingDesc = false;
+  List<String> _folders = const [
+    'Productivity',
+    'Work',
+    'Personal',
+    'Health',
+    'Learning',
+  ];
+
+  static const _tags = [
+    'General',
+    'Work',
+    'Home',
+    'Health',
+    'Learning',
+    'Idea',
+  ];
+
+  static const _priorities = ['none', 'low', 'medium', 'high'];
 
   @override
   void initState() {
     super.initState();
     _task = widget.task;
+    _descCtrl.text = _task.description;
+    _descCtrl.addListener(() {
+      final dirty = _descCtrl.text != _task.description;
+      if (dirty != _descDirty && mounted) {
+        setState(() => _descDirty = dirty);
+      }
+    });
     _load();
+    _loadFolders();
   }
 
   @override
   void dispose() {
     _subCtrl.dispose();
     _noteCtrl.dispose();
+    _descCtrl.dispose();
     super.dispose();
+  }
+
+  /// Folder options: live list when reachable, curated fallback offline.
+  Future<void> _loadFolders() async {
+    try {
+      final folders = await BloomApi().fetchFolders();
+      if (!mounted || folders.isEmpty) return;
+      setState(() {
+        _folders = folders.map((f) => f.name).toList();
+      });
+    } catch (_) {
+      // Offline: curated fallback stands.
+    }
   }
 
   Future<void> _load() async {
@@ -134,7 +181,7 @@ class _TaskDetailScreenState extends State<TaskDetailScreen> {
     // completion plus a 3s UNDO snackbar; reopening is silently reversed.
     // Routed through the repository so it works offline too.
     final next = !s.done;
-    HapticFeedback.lightImpact();
+    AppHaptics.tap();
     await TaskRepository.instance.setSubtaskDone(s.id, next);
     await _load();
     if (!mounted) return;
@@ -178,6 +225,77 @@ class _TaskDetailScreenState extends State<TaskDetailScreen> {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Subtask deleted.')),
       );
+    }
+  }
+
+  /// AI breakdown: suggest 3-5 subtasks, confirm before creating.
+  /// Server upgrades quality (Flash-Lite); offline uses templates.
+  Future<void> _breakdown() async {
+    if (_breaking) return;
+    setState(() => _breaking = true);
+    try {
+      final steps = await AiClient().breakdown(_task.title);
+      if (!mounted || steps.isEmpty) return;
+      AppHaptics.tap();
+      final picked = await showDialog<List<AiStep>>(
+        context: context,
+        builder: (ctx) {
+          final selected = steps.map((_) => true).toList();
+          return StatefulBuilder(
+            builder: (ctx, setSheet) => AlertDialog(
+              backgroundColor: SakuraColors.surface,
+              shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(20)),
+              title: Text('Break it down',
+                  style: TextStyle(color: SakuraColors.ink)),
+              content: SizedBox(
+                width: double.maxFinite,
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    for (var i = 0; i < steps.length; i++)
+                      CheckboxListTile(
+                        value: selected[i],
+                        onChanged: (v) =>
+                            setSheet(() => selected[i] = v ?? true),
+                        title: Text(steps[i].title,
+                            style: TextStyle(color: SakuraColors.ink)),
+                        subtitle: Text('${steps[i].minutes} min',
+                            style:
+                                TextStyle(color: SakuraColors.inkSoft)),
+                        activeColor: SakuraColors.primary,
+                        contentPadding: EdgeInsets.zero,
+                      ),
+                  ],
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.of(ctx).pop(),
+                  child: Text('Cancel',
+                      style: TextStyle(color: SakuraColors.inkSoft)),
+                ),
+                FilledButton(
+                  style: FilledButton.styleFrom(
+                      backgroundColor: SakuraColors.primary),
+                  onPressed: () => Navigator.of(ctx).pop([
+                    for (var i = 0; i < steps.length; i++)
+                      if (selected[i]) steps[i]
+                  ]),
+                  child: const Text('Add selected'),
+                ),
+              ],
+            ),
+          );
+        },
+      );
+      if (picked == null || picked.isEmpty) return;
+      for (final s in picked) {
+        await TaskRepository.instance.createSubtask(_task.id, s.title);
+      }
+      await _load();
+    } finally {
+      if (mounted) setState(() => _breaking = false);
     }
   }
 
@@ -229,15 +347,184 @@ class _TaskDetailScreenState extends State<TaskDetailScreen> {
       lastDate: DateTime.now().add(const Duration(days: 365 * 3)),
     );
     if (picked == null || !mounted) return;
-    await TaskRepository.instance.updateTask(_task.id, dueAt: picked);
+    // Time is optional: dismissing the time picker keeps date-only.
+    final at = await showTimePicker(
+      context: context,
+      initialTime: _task.dueAt == null
+          ? const TimeOfDay(hour: 9, minute: 0)
+          : TimeOfDay.fromDateTime(_task.dueAt!.toLocal()),
+      helpText: 'Due time (optional — cancel for date-only)',
+    );
     if (!mounted) return;
-    setState(() => _task = _task.copyWith(dueAt: picked));
+    final due = at == null
+        ? DateTime(picked.year, picked.month, picked.day)
+        : DateTime(picked.year, picked.month, picked.day, at.hour, at.minute);
+    await TaskRepository.instance.updateTask(_task.id, dueAt: due);
+    if (!mounted) return;
+    setState(() => _task = _task.copyWith(dueAt: due));
   }
 
   Future<void> _clearDue() async {
     await TaskRepository.instance.updateTask(_task.id, clearDue: true);
     if (!mounted) return;
     setState(() => _task = _task.copyWith(clearDue: true));
+  }
+
+  /// Rename via dialog. Empty titles are rejected with feedback.
+  Future<void> _editTitle() async {
+    final ctrl = TextEditingController(text: _task.title);
+    final result = await showDialog<String>(
+      context: context,
+      builder: (ctx) => BloomDialog(
+        title: 'Rename task',
+        confirmLabel: 'Save',
+        onConfirm: () => Navigator.of(ctx).pop(ctrl.text.trim()),
+        body: TextField(
+          controller: ctrl,
+          autofocus: true,
+          textCapitalization: TextCapitalization.sentences,
+          decoration: BloomDialog.fieldDecoration('Task title'),
+          onSubmitted: (_) => Navigator.of(ctx).pop(ctrl.text.trim()),
+        ),
+      ),
+    );
+    // No dispose: showDialog's future completes on pop(), before the
+    // reverse transition finishes — disposing here crashes the still-
+    // mounted field. The route GCs the controller with itself.
+    if (result == null || !mounted) return;
+    if (result.isEmpty) {
+      showBloomSnackBar(context, 'A title needs at least one character.');
+      return;
+    }
+    await TaskRepository.instance.updateTask(_task.id, title: result);
+    if (!mounted) return;
+    setState(() => _task = _task.copyWith(title: result));
+  }
+
+  /// Save the header description field (Markdown or plaintext).
+  Future<void> _saveDescription() async {
+    final text = _descCtrl.text.trim();
+    setState(() => _savingDesc = true);
+    try {
+      await TaskRepository.instance
+          .updateTask(_task.id, description: text);
+      if (!mounted) return;
+      setState(() {
+        _task = _task.copyWith(description: text);
+        _descDirty = false;
+      });
+    } finally {
+      if (mounted) setState(() => _savingDesc = false);
+    }
+  }
+
+  /// Generic option picker bottom sheet. Returns the tapped value.
+  Future<String?> _pickOption({
+    required String title,
+    required List<String> options,
+    required String selected,
+  }) {
+    return showBloomSheet<String>(
+      context,
+      SafeArea(
+        top: false,
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(20, 6, 20, 24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                title,
+                style: TextStyle(
+                  fontSize: 16,
+                  fontWeight: FontWeight.w800,
+                  color: SakuraColors.ink,
+                ),
+              ),
+              const SizedBox(height: 12),
+              for (final o in options)
+                GestureDetector(
+                  onTap: () => Navigator.of(context).pop(o),
+                  behavior: HitTestBehavior.opaque,
+                  child: Container(
+                    width: double.infinity,
+                    margin: const EdgeInsets.only(bottom: 8),
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 14, vertical: 12),
+                    decoration: BoxDecoration(
+                      color: o == selected
+                          ? SakuraColors.primary.withValues(alpha: 0.10)
+                          : SakuraColors.background,
+                      borderRadius: BorderRadius.circular(14),
+                      border: Border.all(
+                        color: o == selected
+                            ? SakuraColors.primary
+                            : SakuraColors.cardBorder,
+                      ),
+                    ),
+                    child: Row(
+                      children: [
+                        Expanded(
+                          child: Text(
+                            o == 'none' ? 'None' : o,
+                            style: TextStyle(
+                              fontSize: 14,
+                              fontWeight: FontWeight.w600,
+                              color: o == selected
+                                  ? SakuraColors.primary
+                                  : SakuraColors.ink,
+                            ),
+                          ),
+                        ),
+                        if (o == selected)
+                          Icon(LucideIcons.check,
+                              size: 15,
+                              color: SakuraColors.primary),
+                      ],
+                    ),
+                  ),
+                ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _pickTag() async {
+    final options = {
+      ..._tags,
+      if (!_tags.contains(_task.tag)) _task.tag,
+    }.toList();
+    final picked = await _pickOption(
+        title: 'Tag', options: options, selected: _task.tag);
+    if (picked == null || picked == _task.tag || !mounted) return;
+    await TaskRepository.instance.updateTask(_task.id, tag: picked);
+    if (!mounted) return;
+    setState(() => _task = _task.copyWith(tag: picked));
+  }
+
+  Future<void> _pickFolder() async {
+    final options = {
+      ..._folders,
+      if (!_folders.contains(_task.folder)) _task.folder,
+    }.toList();
+    final picked = await _pickOption(
+        title: 'Folder', options: options, selected: _task.folder);
+    if (picked == null || picked == _task.folder || !mounted) return;
+    await TaskRepository.instance.updateTask(_task.id, folder: picked);
+    if (!mounted) return;
+    setState(() => _task = _task.copyWith(folder: picked));
+  }
+
+  Future<void> _pickPriority() async {
+    final picked = await _pickOption(
+        title: 'Priority', options: _priorities, selected: _task.priority);
+    if (picked == null || picked == _task.priority || !mounted) return;
+    await TaskRepository.instance.updateTask(_task.id, priority: picked);
+    if (!mounted) return;
+    setState(() => _task = _task.copyWith(priority: picked));
   }
 
   /// Snooze-worthy: dated, open, and due today or overdue. A future
@@ -261,18 +548,16 @@ class _TaskDetailScreenState extends State<TaskDetailScreen> {
     await TaskRepository.instance.updateTask(_task.id, dueAt: next);
     if (!mounted) return;
     setState(() => _task = _task.copyWith(dueAt: next));
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-      content: Text(
-          'Snoozed → ${DateFormat('EEE, MMM d').format(next.toLocal())}'),
-      action: SnackBarAction(
-        label: 'Undo',
-        onPressed: () async {
-          await TaskRepository.instance.updateTask(_task.id, dueAt: prev);
-          if (!mounted) return;
-          setState(() => _task = _task.copyWith(dueAt: prev));
-        },
-      ),
-    ));
+    showBloomSnackBar(
+      context,
+      'Snoozed → ${DateFormat('EEE, MMM d').format(next.toLocal())}',
+      actionLabel: 'Undo',
+      onAction: () async {
+        await TaskRepository.instance.updateTask(_task.id, dueAt: prev);
+        if (!mounted) return;
+        setState(() => _task = _task.copyWith(dueAt: prev));
+      },
+    );
   }
 
   Future<void> _reorderSubs(int oldI, int newI) async {
@@ -343,20 +628,41 @@ class _TaskDetailScreenState extends State<TaskDetailScreen> {
                       children: [
                         Row(
                           children: [
-                            Container(
-                              padding: const EdgeInsets.symmetric(
-                                  horizontal: 10, vertical: 5),
-                              decoration: BoxDecoration(
-                                color: SakuraColors.tagBg,
-                                borderRadius: BorderRadius.circular(8),
-                              ),
-                              child: Text(
-                                _task.tag.toUpperCase(),
-                                style: TextStyle(
-                                  fontSize: 10,
-                                  letterSpacing: 1.6,
-                                  fontWeight: FontWeight.w700,
-                                  color: SakuraColors.tagText,
+                            Expanded(
+                              child: GestureDetector(
+                                onTap: _pickTag,
+                                behavior: HitTestBehavior.opaque,
+                                child: Container(
+                                  padding: const EdgeInsets.symmetric(
+                                      horizontal: 10, vertical: 5),
+                                  decoration: BoxDecoration(
+                                    color: SakuraColors.tagBg,
+                                    borderRadius: BorderRadius.circular(8),
+                                  ),
+                                  child: Row(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      Flexible(
+                                        child: Text(
+                                          _task.tag.toUpperCase(),
+                                          maxLines: 1,
+                                          overflow: TextOverflow.ellipsis,
+                                          style: TextStyle(
+                                            fontSize: 10,
+                                            letterSpacing: 1.6,
+                                            fontWeight: FontWeight.w700,
+                                            color: SakuraColors.tagText,
+                                          ),
+                                        ),
+                                      ),
+                                      const SizedBox(width: 4),
+                                      Icon(
+                                        LucideIcons.penLine,
+                                        size: 10,
+                                        color: SakuraColors.tagText,
+                                      ),
+                                    ],
+                                  ),
                                 ),
                               ),
                             ),
@@ -385,15 +691,205 @@ class _TaskDetailScreenState extends State<TaskDetailScreen> {
                           ],
                         ),
                         const SizedBox(height: 12),
-                        Text(
-                          _task.title,
-                          style: TextStyle(
-                            fontSize: 18,
-                            height: 1.4,
-                            fontWeight: FontWeight.w700,
-                            color: SakuraColors.ink,
+                        GestureDetector(
+                          onTap: _editTitle,
+                          behavior: HitTestBehavior.opaque,
+                          child: Row(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Expanded(
+                                child: Text(
+                                  _task.title,
+                                  style: TextStyle(
+                                    fontSize: 18,
+                                    height: 1.4,
+                                    fontWeight: FontWeight.w700,
+                                    color: SakuraColors.ink,
+                                  ),
+                                ),
+                              ),
+                              const SizedBox(width: 8),
+                              Padding(
+                                padding: const EdgeInsets.only(top: 3),
+                                child: Icon(
+                                  LucideIcons.penLine,
+                                  size: 15,
+                                  color: SakuraColors.inkFaint,
+                                ),
+                              ),
+                            ],
                           ),
                         ),
+                        const SizedBox(height: 4),
+                        Text(
+                          'Tap the title or badges to edit',
+                          style: TextStyle(
+                            fontSize: 10.5,
+                            color: SakuraColors.inkFaint,
+                          ),
+                        ),
+                        const SizedBox(height: 10),
+                        // Folder + priority: tappable pills, saved via
+                        // the repository (optimistic + offline-queued).
+                        Wrap(
+                          spacing: 8,
+                          runSpacing: 8,
+                          children: [
+                            GestureDetector(
+                              onTap: _pickFolder,
+                              behavior: HitTestBehavior.opaque,
+                              child: Container(
+                                padding: const EdgeInsets.symmetric(
+                                    horizontal: 10, vertical: 6),
+                                decoration: BoxDecoration(
+                                  color: SakuraColors.surface,
+                                  borderRadius: BorderRadius.circular(10),
+                                  border: Border.all(
+                                      color: SakuraColors.cardBorder),
+                                ),
+                                child: Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    Icon(
+                                      LucideIcons.folder,
+                                      size: 12,
+                                      color: SakuraColors.primary,
+                                    ),
+                                    const SizedBox(width: 5),
+                                    Text(
+                                      _task.folder,
+                                      style: TextStyle(
+                                        fontSize: 11.5,
+                                        fontWeight: FontWeight.w700,
+                                        color: SakuraColors.ink,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ),
+                            GestureDetector(
+                              onTap: _pickPriority,
+                              behavior: HitTestBehavior.opaque,
+                              child: Container(
+                                padding: const EdgeInsets.symmetric(
+                                    horizontal: 10, vertical: 6),
+                                decoration: BoxDecoration(
+                                  color: _task.priority == 'high'
+                                      ? SakuraColors.primary
+                                          .withValues(alpha: 0.12)
+                                      : SakuraColors.surface,
+                                  borderRadius: BorderRadius.circular(10),
+                                  border: Border.all(
+                                    color: _task.priority == 'high'
+                                        ? SakuraColors.primary
+                                        : SakuraColors.cardBorder,
+                                  ),
+                                ),
+                                child: Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    Icon(
+                                      LucideIcons.flag,
+                                      size: 12,
+                                      color: _task.priority == 'high'
+                                          ? SakuraColors.primary
+                                          : SakuraColors.inkFaint,
+                                    ),
+                                    const SizedBox(width: 5),
+                                    Text(
+                                      _task.priority == 'none'
+                                          ? 'No priority'
+                                          : _task.priority[0]
+                                                  .toUpperCase() +
+                                              _task.priority.substring(1),
+                                      style: TextStyle(
+                                        fontSize: 11.5,
+                                        fontWeight: FontWeight.w700,
+                                        color: _task.priority == 'high'
+                                            ? SakuraColors.primary
+                                            : SakuraColors.ink,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 10),
+                        // Description / notes: multiline, explicit save.
+                        Text(
+                          'DESCRIPTION / NOTES',
+                          style: TextStyle(
+                            fontSize: 10,
+                            letterSpacing: 1.6,
+                            fontWeight: FontWeight.w700,
+                            color: SakuraColors.inkFaint,
+                          ),
+                        ),
+                        const SizedBox(height: 6),
+                        TextField(
+                          controller: _descCtrl,
+                          minLines: 2,
+                          maxLines: 6,
+                          textCapitalization:
+                              TextCapitalization.sentences,
+                          style: TextStyle(
+                              fontSize: 13.5,
+                              height: 1.5,
+                              color: SakuraColors.ink),
+                          decoration: InputDecoration(
+                            hintText:
+                                'What does done look like? Links, context…',
+                            hintStyle: TextStyle(
+                                color: SakuraColors.inkFaint),
+                            filled: true,
+                            fillColor: SakuraColors.background,
+                            contentPadding: const EdgeInsets.symmetric(
+                                horizontal: 12, vertical: 10),
+                            border: OutlineInputBorder(
+                              borderRadius: BorderRadius.circular(12),
+                              borderSide: BorderSide(
+                                  color: SakuraColors.cardBorder),
+                            ),
+                            enabledBorder: OutlineInputBorder(
+                              borderRadius: BorderRadius.circular(12),
+                              borderSide: BorderSide(
+                                  color: SakuraColors.cardBorder),
+                            ),
+                            focusedBorder: OutlineInputBorder(
+                              borderRadius: BorderRadius.circular(12),
+                              borderSide: BorderSide(
+                                  color: SakuraColors.primary, width: 1.5),
+                            ),
+                          ),
+                        ),
+                        if (_descDirty) ...[
+                          const SizedBox(height: 8),
+                          SizedBox(
+                            width: double.infinity,
+                            child: FilledButton(
+                              style: FilledButton.styleFrom(
+                                backgroundColor: SakuraColors.primary,
+                                padding: const EdgeInsets.symmetric(
+                                    vertical: 11),
+                                shape: RoundedRectangleBorder(
+                                    borderRadius:
+                                        BorderRadius.circular(12)),
+                              ),
+                              onPressed:
+                                  _savingDesc ? null : _saveDescription,
+                              child: Text(
+                                _savingDesc
+                                    ? 'Saving…'
+                                    : 'Save description',
+                                style: const TextStyle(
+                                    fontWeight: FontWeight.w700),
+                              ),
+                            ),
+                          ),
+                        ],
                         const SizedBox(height: 8),
                         Row(
                           children: [
@@ -418,7 +914,7 @@ class _TaskDetailScreenState extends State<TaskDetailScreen> {
                                     Text(
                                       _task.dueAt == null
                                           ? 'No due date — tap to set'
-                                          : 'Due ${DateFormat('EEE, MMM d').format(_task.dueAt!.toLocal())}',
+                                          : 'Due ${DateFormat('EEE, MMM d').format(_task.dueAt!.toLocal())}${_task.dueAt!.hour != 0 || _task.dueAt!.minute != 0 ? ' · ${DateFormat('HH:mm').format(_task.dueAt!.toLocal())}' : ''}',
                                       style: TextStyle(
                                         fontSize: 12.5,
                                         fontWeight: FontWeight.w600,
@@ -668,6 +1164,30 @@ class _TaskDetailScreenState extends State<TaskDetailScreen> {
                                 fontSize: 11,
                                 fontWeight: FontWeight.w700,
                                 color: SakuraColors.inkSoft,
+                              ),
+                            ),
+                            const SizedBox(width: 8),
+                            GestureDetector(
+                              onTap: _breaking ? null : _breakdown,
+                              behavior: HitTestBehavior.opaque,
+                              child: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  Icon(
+                                    LucideIcons.sparkles,
+                                    size: 12,
+                                    color: SakuraColors.primary,
+                                  ),
+                                  const SizedBox(width: 4),
+                                  Text(
+                                    _breaking ? 'Thinking…' : 'Break down',
+                                    style: TextStyle(
+                                      fontSize: 11,
+                                      fontWeight: FontWeight.w700,
+                                      color: SakuraColors.primary,
+                                    ),
+                                  ),
+                                ],
                               ),
                             ),
                           ],

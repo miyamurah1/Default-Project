@@ -30,4 +30,37 @@ void main() {
     await svc.scheduleDaily();
     await svc.cancelDaily();
   });
+
+  test('focus alarm schedule/cancel never throw headless', () async {
+    final svc = ReminderService.instance;
+    await svc.init();
+    // Headless: permission request fails closed, scheduling degrades to
+    // a no-op. The exact-alarm path needs a real device.
+    await svc.scheduleFocusTimerNotification(
+      duration: const Duration(minutes: 25),
+      label: 'Free Deep Work',
+    );
+    await svc.cancelFocusTimerNotification();
+    await svc.scheduleFocusTimerNotification(
+      duration: Duration.zero,
+      label: 'x',
+    );
+    await svc.cancelFocusTimerNotification();
+  });
+
+  test('task alarm ids are stable and non-negative', () {
+    expect(ReminderService.taskAlarmId('abc'),
+        ReminderService.taskAlarmId('abc'));
+    expect(ReminderService.taskAlarmId('abc') >= 0, isTrue);
+    expect(ReminderService.taskAlarmId('a'),
+        isNot(ReminderService.taskAlarmId('b')));
+  });
+
+  test('sync + drain are headless-safe', () async {
+    final svc = ReminderService.instance;
+    await svc.init();
+    await svc.syncTaskReminders(const []);
+    await svc.cancelAllTaskReminders();
+    expect(await ReminderService.drainNotifTask(), isNull);
+  });
 }

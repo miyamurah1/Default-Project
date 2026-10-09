@@ -1,9 +1,11 @@
 import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter/material.dart';
+import 'package:google_fonts/google_fonts.dart';
 
 import '../game/game.dart';
 import 'data/api_client.dart';
 import 'data/auth_store.dart';
+import 'data/crash_reports.dart';
 import 'data/energy_store.dart';
 import 'data/reminders.dart';
 import 'firebase_options.dart';
@@ -32,8 +34,25 @@ void main() async {
   await ReminderService.instance.load();
   await ReminderService.instance.init();
 
-  runApp(const DailyBloomApp());
+  // Warm the Inter files first paint uses (400/600/700/800) so cold
+  // start never swaps fonts mid-layout. Best-effort with a short cap:
+  // offline boot must never wait on font fetching.
+  try {
+    await GoogleFonts.pendingFonts([
+      GoogleFonts.inter(fontWeight: FontWeight.w400),
+      GoogleFonts.inter(fontWeight: FontWeight.w600),
+      GoogleFonts.inter(fontWeight: FontWeight.w700),
+      GoogleFonts.inter(fontWeight: FontWeight.w800),
+    ]).timeout(const Duration(seconds: 4));
+  } catch (_) {
+    // Offline or slow network: fall back to system fonts for this run.
+  }
 
+  // Crash reporting last: Sentry wraps runApp when a DSN was baked in
+  // AND the user left the Settings toggle on. Otherwise plain runApp.
+  await CrashReports.init(() async {
+    runApp(const DailyBloomApp());
+  });
   // Restore profile from Firebase auth state. If already signed in, the
   // listener in AuthStore.restore() fires immediately and syncs the theme.
   AuthStore.instance.restore().then((_) {

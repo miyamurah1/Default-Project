@@ -1,20 +1,54 @@
+import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter/widgets.dart';
 
-/// Best-effort end-of-session chime. Uses only framework channels —
-/// no audio packages, no assets, works offline. On platforms without
-/// a system alert tone this silently degrades to haptics, then to
-/// nothing. Never throws into callers (safe in unit tests too).
+/// End-of-session chime: the bundled singing-bowl bell at full volume
+/// plus a heavy haptic — audible even where the old system-alert tone
+/// was swallowed (silent/vibrate Android, Windows).
+///
+/// Best-effort and test-safe: every step is guarded, so missing assets,
+/// headless tests, and offline runs degrade to haptics, then to nothing.
+/// Never throws into callers.
 abstract class SessionSound {
+  /// Created lazily inside [chime]'s guarded block: audioplayers touches
+  /// platform channels at construction, which throws without a binding
+  /// (plain unit tests) — so construction itself must be guarded.
+  static AudioPlayer? _player;
+
+  /// Play the bundled bell at full volume + heavy haptic. Guarded at
+  /// every step: asset, system tone, and vibrator each degrade silently.
   static Future<void> chime() async {
     try {
-      await SystemSound.play(SystemSoundType.alert);
+      // Touching the player without a binding (plain unit tests) throws
+      // in an async gap that try/catch cannot see — so check first.
+      WidgetsBinding.instance;
+      _player ??= AudioPlayer();
+      await _player!.setVolume(1.0);
+      await _player!.play(AssetSource('sounds/bell.wav'));
     } catch (_) {
-      // No system tone available — haptics below still carry it.
+      // No binding, or asset/player unavailable — fall back below.
+      try {
+        await SystemSound.play(SystemSoundType.alert);
+      } catch (_) {
+        // No system tone available either.
+      }
     }
     try {
       await HapticFeedback.heavyImpact();
     } catch (_) {
       // Desktop / test harness without a vibrator.
+    }
+  }
+
+  /// Test seam: reports whether the bundled asset played without error.
+  /// Never used in production paths.
+  static Future<bool> debugPlayAsset() async {
+    try {
+      WidgetsBinding.instance;
+      await AudioPlayer().play(AssetSource('sounds/bell.wav'));
+      return true;
+    } catch (_) {
+      return false;
     }
   }
 }

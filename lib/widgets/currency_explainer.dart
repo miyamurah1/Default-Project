@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:lucide_flutter/lucide_flutter.dart';
 
 import '../theme/sakura_theme.dart';
+import 'bloom_sheet.dart';
 
 /// Currency explainer: what XP, tokens, streak, and combo actually do.
 ///
@@ -11,34 +12,14 @@ import '../theme/sakura_theme.dart';
 /// the StreakTag rule (>= 3 shows) for streaks. Update this sheet when
 /// the tuning changes, not the other way around.
 Future<void> showCurrencyExplainer(BuildContext context) {
-  return showModalBottomSheet(
-    context: context,
-    backgroundColor: Colors.transparent,
-    builder: (ctx) => Container(
-      padding: const EdgeInsets.fromLTRB(22, 12, 22, 28),
-      decoration: BoxDecoration(
-        color: SakuraColors.surface,
-        borderRadius: const BorderRadius.vertical(top: Radius.circular(28)),
-        border: Border(top: BorderSide(color: SakuraColors.cardBorder)),
-      ),
-      // Scrollable: inflated test fonts, landscape, and large-text modes
-      // can all make 4 rows taller than the modal — scroll, never clip.
-      child: SingleChildScrollView(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Center(
-              child: Container(
-                width: 36,
-                height: 4,
-                margin: const EdgeInsets.only(bottom: 14),
-                decoration: BoxDecoration(
-                  color: SakuraColors.cardBorder,
-                  borderRadius: BorderRadius.circular(2),
-                ),
-              ),
-            ),
+  return showBloomSheet(
+    context,
+    SingleChildScrollView(
+      padding: const EdgeInsets.fromLTRB(22, 6, 22, 28),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
             Text(
               'WHAT COINS MEAN',
               style: TextStyle(
@@ -76,7 +57,6 @@ Future<void> showCurrencyExplainer(BuildContext context) {
           ],
         ),
       ),
-    ),
   );
 }
 

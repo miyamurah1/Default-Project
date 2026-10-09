@@ -3,6 +3,8 @@ import 'package:lucide_flutter/lucide_flutter.dart';
 
 import '../data/api_client.dart';
 import '../data/auth_store.dart';
+import '../data/mock_data.dart';
+import '../data/task_repository.dart';
 import '../theme/sakura_theme.dart';
 import '../widgets/bloom_dialog.dart';
 import '../widgets/motion.dart';
@@ -58,12 +60,28 @@ class _FoldersScreenState extends State<FoldersScreen> {
         });
         return;
       }
-      // Trust rule: offline shows the honest empty-state card below —
-      // never sample folders presented as the user's own.
+      // Offline: derive folders from the cached task list so the shelf
+      // stays browsable — counts computed locally, never anyone else's.
+      final tasks = TaskRepository.instance.tasks;
+      final names = <String, List<Task>>{};
+      for (final t in tasks) {
+        (names[t.folder] ??= []).add(t);
+      }
+      final fallback = names.entries
+          .map((e) => BloomFolder(
+                name: e.key,
+                total: e.value.length,
+                completed:
+                    e.value.where((t) => t.status == 'done').length,
+              ))
+          .toList()
+        ..sort((a, b) => a.name.compareTo(b.name));
       setState(() {
         _loading = false;
-        _error = 'API offline — connect to sync your folders.';
-        _folders = const [];
+        _error = tasks.isEmpty
+            ? 'API offline — connect to sync your folders.'
+            : 'Offline — showing folders from your saved tasks.';
+        _folders = fallback;
       });
     }
   }

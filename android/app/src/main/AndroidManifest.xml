@@ -1,4 +1,11 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- Voice capture (quick-add mic). Requested at first use, not install. -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <!-- Focus-timer expiry alarm: exact timing when granted (Android 12+),
+         graceful inexact fallback otherwise. Requested at timer start.
+         (USE_EXACT_ALARM deliberately NOT declared — Play reserves it
+         for clock/calendar apps; SCHEDULE_EXACT_ALARM is user-grantable.) -->
+    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
     <application
         android:label="Daily Bloom"
         android:name="${applicationName}"
@@ -24,7 +31,22 @@
                 <action android:name="android.intent.action.MAIN"/>
                 <category android:name="android.intent.category.LAUNCHER"/>
             </intent-filter>
+
+            <!-- Widget taps arrive here with dailybloom:// URIs. -->
+            <intent-filter>
+                <action android:name="es.antonborri.home_widget.action.LAUNCH" />
+            </intent-filter>
         </activity>
+
+        <!-- Today's-plan home-screen widget (RemoteViews, pushed from Dart). -->
+        <receiver android:name=".PlanWidgetProvider"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data android:name="android.appwidget.provider"
+                android:resource="@xml/plan_widget_info" />
+        </receiver>
         <!-- Don't delete the meta-data below.
              This is used by the Flutter tool to generate GeneratedPluginRegistrant.java -->
         <meta-data

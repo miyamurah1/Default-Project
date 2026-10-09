@@ -152,6 +152,8 @@ class _FlowCanvasScreenState extends State<FlowCanvasScreen> {
                               20, 8, 20, 32),
                           itemCount: _tasks.length,
                           itemBuilder: (ctx, i) => Entrance(
+                            key: ValueKey('flow-entrance-${_tasks[i].id}'),
+                            onceKey: 'flow-${_tasks[i].id}',
                             delayMs: (i * 60).clamp(0, 300),
                             child: Padding(
                               padding:
@@ -198,6 +200,8 @@ class _FlowCanvasScreenState extends State<FlowCanvasScreen> {
                       for (var i = 0; i < _tasks.length; i++) ...[
                         if (i > 0) const SizedBox(width: 22),
                         Entrance(
+                          key: ValueKey('flow-entrance-${_tasks[i].id}'),
+                          onceKey: 'flow-${_tasks[i].id}',
                           delayMs: (i * 60).clamp(0, 300),
                           child: _taskCard(_tasks[i],
                               width: 300, capSubs: true),

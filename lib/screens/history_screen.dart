@@ -5,7 +5,9 @@ import 'package:lucide_flutter/lucide_flutter.dart';
 import '../data/api_client.dart';
 import '../data/auth_store.dart';
 import '../data/mock_data.dart';
+import '../data/task_repository.dart';
 import '../theme/sakura_theme.dart';
+import '../widgets/bloom_snackbar.dart';
 import '../widgets/motion.dart';
 import 'task_detail_screen.dart';
 
@@ -55,10 +57,13 @@ class _HistoryScreenState extends State<HistoryScreen> {
     } catch (e) {
       if (!mounted) return;
       if (e is AuthExpiredException) return;
-      setState(() => _loading = false);
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Could not load history.')),
-      );
+      // Offline: the repository's cached done list stands in — history
+      // stays browsable (and searchable) with zero network.
+      setState(() {
+        _done = TaskRepository.instance.doneTasks;
+        _loading = false;
+      });
+      showBloomSnackBar(context, 'Offline — showing your saved history.');
     }
   }
 

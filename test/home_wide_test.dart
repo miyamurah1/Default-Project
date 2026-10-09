@@ -8,17 +8,17 @@ import 'package:flutter/rendering.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-/// Home's product contract (Zen Bento era):
-/// bento header (~130px) -> heat map -> shortcuts -> Today's Flow board.
-/// The board is intentionally LAST — the day's evidence and doors sit
-/// above the work.
+/// Home's product contract (productivity-first era):
+/// bento header -> Today's Flow board -> planner -> collapsed 12-week
+/// evidence -> shortcuts. The work owns the first viewport; metrics sit
+/// below it, and the heatmap opens only on demand.
 void main() {
   setUp(() => SharedPreferences.setMockInitialValues({
         // First-run concept map dismissed: the steady-state layout.
         'bloom_concept_seen_v1': true,
       }));
 
-  testWidgets('heat map + shortcuts sit above the board (board last)',
+  testWidgets('board sits above the fold, evidence collapses below it',
       (tester) async {
     for (final mobile in [true, false]) {
       final w = mobile ? 390.0 : 1400.0;
@@ -35,7 +35,8 @@ void main() {
 
       final header = find.byKey(const ValueKey('home_hud_card'));
       final board = find.byType(TaskFlowList, skipOffstage: false);
-      final heat = find.byType(ContributionHeatmap);
+      final heat = find.byType(ContributionHeatmap, skipOffstage: false);
+      final disclosure = find.text('12-WEEK EVIDENCE');
       final shortcuts = mobile
           ? find.byKey(const ValueKey('home_quick_link_0'))
           : find.byKey(const ValueKey('home_quick_links'));
@@ -43,26 +44,75 @@ void main() {
       expect(header, findsOneWidget, reason: 'width $w');
       expect(board, findsOneWidget, reason: 'width $w');
       expect(heat, findsOneWidget, reason: 'width $w');
+      expect(disclosure, findsOneWidget, reason: 'width $w');
       expect(shortcuts, findsOneWidget, reason: 'width $w');
 
       final headerRect = tester.getRect(header);
-      final heatRect = tester.getRect(heat);
-      final shortcutRect = tester.getRect(shortcuts);
       final boardRect = tester.getRect(board);
+      final disclosureRect = tester.getRect(disclosure);
+      final shortcutRect = tester.getRect(shortcuts);
 
-      // Compact bento: ~130px tall (allow a small tolerance).
-      expect(headerRect.height, lessThanOrEqualTo(150),
-          reason: 'bento stays compact, width $w');
-      expect(headerRect.height, greaterThanOrEqualTo(110),
-          reason: 'bento is a real header, width $w');
-      // Order: header -> heat map -> shortcuts -> board (board last).
-      expect(headerRect.bottom, lessThanOrEqualTo(heatRect.top),
-          reason: 'heat map after header, width $w');
-      expect(heatRect.bottom, lessThanOrEqualTo(shortcutRect.top),
-          reason: 'shortcuts under the heat map, width $w');
-      expect(shortcutRect.bottom, lessThanOrEqualTo(boardRect.top),
-          reason: 'board last, width $w');
+      if (mobile) {
+        // Narrow phones stack focus OVER level (full-width cells so
+        // nothing ellipsises): taller than the desktop 130px band.
+        expect(headerRect.height, greaterThanOrEqualTo(200),
+            reason: 'stacked bento fits both cards, width $w');
+        expect(headerRect.height, lessThanOrEqualTo(340),
+            reason: 'stacked bento stays compact, width $w');
+        // Focus card sits above the seedling/XP card.
+        final focusTop =
+            tester.getTopLeft(find.text("Today's focus")).dy;
+        final xp = find.textContaining('/100 XP');
+        // XP counter may vary with game state; fall back to streak line.
+        final below = xp.evaluate().isNotEmpty
+            ? tester.getTopLeft(xp).dy
+            : tester.getTopLeft(find.textContaining('d · x')).dy;
+        expect(focusTop, lessThan(below),
+            reason: 'focus above level-up, width $w');
+      } else {
+        // Compact desktop bento: ~130px tall (allow a small tolerance).
+        expect(headerRect.height, lessThanOrEqualTo(150),
+            reason: 'bento stays compact, width $w');
+        expect(headerRect.height, greaterThanOrEqualTo(110),
+            reason: 'bento is a real header, width $w');
+      }
+      // Order: header -> board -> evidence disclosure -> shortcuts.
+      // The board owns the first viewport; metrics sit below the work.
+      expect(headerRect.bottom, lessThanOrEqualTo(boardRect.top),
+          reason: 'board directly under header, width $w');
+      expect(boardRect.bottom, lessThanOrEqualTo(disclosureRect.top),
+          reason: 'evidence below the work, width $w');
+      expect(disclosureRect.bottom,
+          lessThanOrEqualTo(shortcutRect.top),
+          reason: 'shortcuts under the evidence, width $w');
     }
+  });
+
+  testWidgets('evidence disclosure expands the heatmap on tap',
+      (tester) async {
+    tester.view.physicalSize = const Size(390, 1400);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(() {
+      tester.view.resetPhysicalSize();
+      tester.view.resetDevicePixelRatio();
+    });
+    await tester.pumpWidget(const MaterialApp(home: HomeScreen()));
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 2));
+    expect(tester.takeException(), isNull);
+
+    // Collapsed by default: the grid stays offstage until asked for.
+    expect(find.byType(ContributionHeatmap), findsNothing,
+        reason: 'heatmap collapsed by default');
+
+    await tester.tap(find.text('Show'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(tester.takeException(), isNull);
+    final heatRect = tester.getRect(find.byType(ContributionHeatmap));
+    expect(heatRect.height, greaterThan(100),
+        reason: 'heatmap expands on demand');
+    expect(find.text('Hide'), findsOneWidget);
   });
 
   testWidgets('bento header carries the intention, seedling and streak',

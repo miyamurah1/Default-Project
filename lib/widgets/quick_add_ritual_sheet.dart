@@ -1,10 +1,11 @@
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:lucide_flutter/lucide_flutter.dart';
 
 import '../data/habit_store.dart';
+import '../data/haptics.dart';
 import '../screens/habits_screen.dart';
 import '../theme/sakura_theme.dart';
+import 'bloom_sheet.dart';
 
 /// Contextual "plant a ritual" sheet behind the Rituals-tab FAB.
 ///
@@ -12,30 +13,14 @@ import '../theme/sakura_theme.dart';
 /// [showGoalSheet]) and the built-in [RitualPresets] shelf, so a ritual
 /// is only ever created one way — the FAB just shortens the path.
 Future<void> showQuickAddRitual(BuildContext context) {
-  return showModalBottomSheet<void>(
-    context: context,
-    backgroundColor: SakuraColors.surface,
-    shape: const RoundedRectangleBorder(
-      borderRadius: BorderRadius.vertical(top: Radius.circular(28)),
-    ),
-    builder: (ctx) => SafeArea(
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(22, 14, 22, 22),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Center(
-              child: Container(
-                width: 42,
-                height: 4,
-                decoration: BoxDecoration(
-                  color: SakuraColors.cardBorder,
-                  borderRadius: BorderRadius.circular(2),
-                ),
-              ),
-            ),
-            const SizedBox(height: 14),
+  return showBloomSheet<void>(
+    context,
+    Padding(
+      padding: const EdgeInsets.fromLTRB(22, 6, 22, 22),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
             // Gradient header, matching the quick-add task sheet.
             Container(
               width: double.infinity,
@@ -75,8 +60,8 @@ Future<void> showQuickAddRitual(BuildContext context) {
                 Expanded(
                   child: OutlinedButton.icon(
                     onPressed: () {
-                      HapticFeedback.lightImpact();
-                      Navigator.of(ctx).pop();
+                      AppHaptics.select();
+                      Navigator.of(context).pop();
                       showHabitSheet(context);
                     },
                     icon: const Icon(LucideIcons.checkSquare, size: 16),
@@ -95,8 +80,8 @@ Future<void> showQuickAddRitual(BuildContext context) {
                 Expanded(
                   child: FilledButton.icon(
                     onPressed: () {
-                      HapticFeedback.lightImpact();
-                      Navigator.of(ctx).pop();
+                      AppHaptics.select();
+                      Navigator.of(context).pop();
                       showGoalSheet(context);
                     },
                     icon: const Icon(LucideIcons.target, size: 16),
@@ -134,8 +119,8 @@ Future<void> showQuickAddRitual(BuildContext context) {
                     label: 'Plant ${p.goalName}',
                     child: GestureDetector(
                       onTap: () async {
-                        Navigator.of(ctx).pop();
-                        HapticFeedback.lightImpact();
+                        Navigator.of(context).pop();
+                        AppHaptics.tap();
                         final n = await HabitStore.instance.applyPreset(p);
                         if (!context.mounted) return;
                         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
@@ -169,6 +154,5 @@ Future<void> showQuickAddRitual(BuildContext context) {
           ],
         ),
       ),
-    ),
   );
 }

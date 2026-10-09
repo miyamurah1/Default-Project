@@ -26,6 +26,14 @@ class GamificationStateNotifier extends ChangeNotifier {
   static const _kTokens = 'bloom_game_tokens';
   static const _kStreak = 'bloom_game_streak';
   static const _kLastDay = 'bloom_game_last_day';
+  static const _kStakeDay = 'bloom_game_stake_day';
+  static const _kStakeIds = 'bloom_game_stake_ids';
+  static const _kWilted = 'bloom_game_wilted';
+  static const _kLastStakeLoss = 'bloom_game_last_stake_loss';
+  static const _kWiltStreak = 'bloom_game_wilt_streak';
+  static const _kDoneDay = 'bloom_game_done_day';
+  static const _kDoneCount = 'bloom_game_done_count';
+  static const _kNudgedDay = 'bloom_game_nudged_day';
 
   /// App-wide singleton — screens share one combo / XP / streak.
   static final GamificationStateNotifier instance =
@@ -35,6 +43,25 @@ class GamificationStateNotifier extends ChangeNotifier {
   int _tokens = 0;
   int _streak = 0;
   String? _lastDayIso;
+
+  /// Today's stake: task ids planned via Plan-my-day, each risking
+  /// [BloomEngine.stakePerTask] XP if unfinished at rollover.
+  String? _stakedDayIso;
+  List<String> _stakedIds = const [];
+
+  /// True after a morning wilt, cleared by the next completion.
+  bool _wilted = false;
+  int _lastStakeLoss = 0;
+
+  /// Consecutive mornings with a wilt. At 2+, the next settle is
+  /// forgiven (rest mode) — compassion as a rule, not a sentence.
+  int _wiltStreak = 0;
+
+  /// Completions today (for the after-3rd review nudge) + the day the
+  /// nudge last fired, so it suggests once, never nags.
+  String? _doneDayIso;
+  int _doneCount = 0;
+  String? _nudgedDayIso;
 
   DateTime? _lastCompletionAt;
   int _comboCount = 0;
@@ -69,6 +96,38 @@ class GamificationStateNotifier extends ChangeNotifier {
   bool get isComboLive => comboCount > 0;
   DateTime? get comboExpiresAt => _comboExpiresAt;
 
+  /// Day-key the current stake belongs to, null when nothing staked.
+  String? get stakedDayIso => _stakedDayIso;
+
+  /// Task ids at stake today (max 3, latest plan wins).
+  List<String> get stakedIds => List.unmodifiable(_stakedIds);
+
+  /// True after a morning wilt — cleared by the next completion.
+  bool get wilted => _wilted;
+
+  /// XP lost in the most recent settle (0 when all kept).
+  int get lastStakeLoss => _lastStakeLoss;
+
+  /// Consecutive mornings with a wilt. At 2+, tonight is free.
+  int get wiltStreak => _wiltStreak;
+
+  /// Completions so far today (resets at midnight).
+  int get todayCompletions {
+    if (_doneDayIso != _dayKey(DateTime.now())) return 0;
+    return _doneCount;
+  }
+
+  /// Whether the review nudge already fired today.
+  bool get reviewNudgedToday =>
+      _nudgedDayIso == _dayKey(DateTime.now());
+
+  /// Mark the review nudge as shown for today.
+  void markReviewNudged() {
+    _nudgedDayIso = _dayKey(DateTime.now());
+    _persist();
+    notifyListeners();
+  }
+
   // --- Writes ---
 
   /// Call when a task is completed. Returns the XP granted (incl. bonus).
@@ -85,8 +144,16 @@ class GamificationStateNotifier extends ChangeNotifier {
     _comboExpiresAt = now.add(BloomEngine.comboWindow);
     _scheduleComboExpiry();
 
+    final day = _dayKey(now);
+    if (_doneDayIso == day) {
+      _doneCount++;
+    } else {
+      _doneDayIso = day;
+      _doneCount = 1;
+    }
     final gain = BloomEngine.xpForCombo(baseXp, _comboCount);
     _totalXp += gain;
+    _wilted = false; // a fresh bloom clears yesterday's wilt
     _persist();
     notifyListeners();
     return gain;
@@ -169,6 +236,79 @@ class GamificationStateNotifier extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// Stake today's plan: up to 3 task ids each risking
+  /// [BloomEngine.stakePerTask] XP overnight. Latest plan wins.
+  /// Always previewed in the planner card — never a surprise.
+  void stakeDay(List<String> taskIds, [DateTime? now]) {
+    _stakedDayIso = _dayKey(now ?? DateTime.now());
+    _stakedIds = taskIds.where((id) => id.isNotEmpty).take(3).toList();
+    _persist();
+    notifyListeners();
+  }
+
+  /// Settle a past day's stake. [doneIds] are finished task ids,
+  /// [existingIds] are ids that still exist (deleted tasks are exempt —
+  /// removing a task is planning, not failing).
+  ///
+  /// Returns a record: XP lost, tasks kept, tasks wilted, and whether the
+  /// morning was forgiven. Loss is capped at
+  /// [BloomEngine.maxDailyStakeLoss] and floored at the current level's
+  /// base, so a bad morning costs progress but never a level. After two
+  /// consecutive wilt mornings the next settle is forgiven (rest mode)
+  /// and the streak mercy-resets.
+  ({int lost, int kept, int wiltedCount, bool rested}) settleDay(
+    Set<String> doneIds,
+    Set<String> existingIds, [
+    DateTime? now,
+  ]) {
+    final staked = _stakedIds;
+    _stakedDayIso = null;
+    _stakedIds = const [];
+    if (staked.isEmpty) {
+      _lastStakeLoss = 0;
+      _persist();
+      notifyListeners();
+      return (lost: 0, kept: 0, wiltedCount: 0, rested: false);
+    }
+    var kept = 0;
+    var missed = 0;
+    for (final id in staked) {
+      if (!existingIds.contains(id)) continue; // deleted: exempt
+      if (doneIds.contains(id)) {
+        kept++;
+      } else {
+        missed++;
+      }
+    }
+    final loss = BloomEngine.stakeLossFor(missed);
+    if (loss <= 0) {
+      // Clean sweep (or all-exempt): the streak resets, no wilt.
+      _wiltStreak = 0;
+      _lastStakeLoss = 0;
+      _persist();
+      notifyListeners();
+      return (lost: 0, kept: kept, wiltedCount: 0, rested: false);
+    }
+    if (_wiltStreak >= 2) {
+      // Third tired morning: forgiven, streak mercy-resets, no wilt.
+      _wiltStreak = 0;
+      _wilted = false;
+      _lastStakeLoss = 0;
+      _persist();
+      notifyListeners();
+      return (lost: 0, kept: kept, wiltedCount: missed, rested: true);
+    }
+    // Floor at the current level's base — wilt, never de-level.
+    final floor = BloomEngine.totalXpForLevel(level);
+    _totalXp = (_totalXp - loss).clamp(floor, 1 << 62);
+    _wilted = true;
+    _wiltStreak++;
+    _lastStakeLoss = loss;
+    _persist();
+    notifyListeners();
+    return (lost: loss, kept: kept, wiltedCount: missed, rested: false);
+  }
+
   /// Demo helper: max the profile to Full Bloom so the whole app can be
   /// seen at Lv 100 (Sakura, 5/5 season, live x5 combo, petals on).
   /// No server writes — local game juice only.
@@ -196,6 +336,14 @@ class GamificationStateNotifier extends ChangeNotifier {
     _lastCompletionAt = null;
     _comboExpiresAt = null;
     _lastDayIso = _dayKey(DateTime.now());
+    _stakedDayIso = null;
+    _stakedIds = const [];
+    _wilted = false;
+    _lastStakeLoss = 0;
+    _wiltStreak = 0;
+    _doneDayIso = _dayKey(DateTime.now());
+    _doneCount = 0;
+    _nudgedDayIso = null;
     _persist();
     notifyListeners();
   }
@@ -209,6 +357,14 @@ class GamificationStateNotifier extends ChangeNotifier {
       _tokens = prefs.getInt(_kTokens) ?? 0;
       _streak = prefs.getInt(_kStreak) ?? 0;
       _lastDayIso = prefs.getString(_kLastDay);
+      _stakedDayIso = prefs.getString(_kStakeDay);
+      _stakedIds = prefs.getStringList(_kStakeIds) ?? const [];
+      _wilted = prefs.getBool(_kWilted) ?? false;
+      _lastStakeLoss = prefs.getInt(_kLastStakeLoss) ?? 0;
+      _wiltStreak = prefs.getInt(_kWiltStreak) ?? 0;
+      _doneDayIso = prefs.getString(_kDoneDay);
+      _doneCount = prefs.getInt(_kDoneCount) ?? 0;
+      _nudgedDayIso = prefs.getString(_kNudgedDay);
       notifyListeners();
     } catch (_) {
       // Offline / first run: keep zeros.
@@ -222,6 +378,22 @@ class GamificationStateNotifier extends ChangeNotifier {
       await prefs.setInt(_kTokens, _tokens);
       await prefs.setInt(_kStreak, _streak);
       if (_lastDayIso != null) await prefs.setString(_kLastDay, _lastDayIso!);
+      if (_stakedDayIso != null) {
+        await prefs.setString(_kStakeDay, _stakedDayIso!);
+      } else {
+        await prefs.remove(_kStakeDay);
+      }
+      await prefs.setStringList(_kStakeIds, _stakedIds);
+      await prefs.setBool(_kWilted, _wilted);
+      await prefs.setInt(_kLastStakeLoss, _lastStakeLoss);
+      await prefs.setInt(_kWiltStreak, _wiltStreak);
+      if (_doneDayIso != null) {
+        await prefs.setString(_kDoneDay, _doneDayIso!);
+      }
+      await prefs.setInt(_kDoneCount, _doneCount);
+      if (_nudgedDayIso != null) {
+        await prefs.setString(_kNudgedDay, _nudgedDayIso!);
+      }
     } catch (_) {
       // Persistence is a bonus — gameplay continues in memory.
     }

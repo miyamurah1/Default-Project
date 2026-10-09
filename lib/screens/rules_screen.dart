@@ -5,6 +5,7 @@ import 'package:lucide_flutter/lucide_flutter.dart';
 import '../data/api_client.dart';
 import '../data/auth_store.dart';
 import '../theme/sakura_theme.dart';
+import '../widgets/bloom_sheet.dart';
 import '../widgets/motion.dart';
 import 'activity_screen.dart';
 import 'flow_canvas_screen.dart';
@@ -491,12 +492,10 @@ class _RulesScreenState extends State<RulesScreen> {
   /// Tapping a flow card opens its detail — previously the card itself
   /// did nothing (only Runs / Switch / Delete responded).
   void _openDetail(FlowRule r) {
-    showModalBottomSheet(
-      context: context,
-      shape: const RoundedRectangleBorder(
-          borderRadius: BorderRadius.vertical(top: Radius.circular(24))),
-      builder: (ctx) => Padding(
-        padding: const EdgeInsets.fromLTRB(20, 16, 20, 28),
+    showBloomSheet(
+      context,
+      Padding(
+        padding: const EdgeInsets.fromLTRB(20, 6, 20, 28),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -546,7 +545,7 @@ class _RulesScreenState extends State<RulesScreen> {
                 Expanded(
                   child: OutlinedButton.icon(
                     onPressed: () {
-                      Navigator.of(ctx).pop();
+                      Navigator.of(context).pop();
                       _openRuns(r);
                     },
                     icon: const Icon(LucideIcons.history, size: 15),
@@ -557,7 +556,7 @@ class _RulesScreenState extends State<RulesScreen> {
                 Expanded(
                   child: OutlinedButton.icon(
                     onPressed: () {
-                      Navigator.of(ctx).pop();
+                      Navigator.of(context).pop();
                       _openChain();
                     },
                     icon: const Icon(LucideIcons.gitBranch, size: 15),
@@ -570,7 +569,7 @@ class _RulesScreenState extends State<RulesScreen> {
                     style: FilledButton.styleFrom(
                         backgroundColor: SakuraColors.primary),
                     onPressed: () {
-                      Navigator.of(ctx).pop();
+                      Navigator.of(context).pop();
                       _toggle(r, !r.enabled);
                     },
                     child: Text(r.enabled ? 'Disable' : 'Enable'),
@@ -747,6 +746,8 @@ class _RulesScreenState extends State<RulesScreen> {
                     final i = entry.key;
                     final r = entry.value;
                     return Entrance(
+                      key: ValueKey('rule-entrance-${r.id}'),
+                      onceKey: 'rule-${r.id}',
                       delayMs: (i * 70).clamp(0, 350),
                       child: Material(
                         color: Colors.transparent,

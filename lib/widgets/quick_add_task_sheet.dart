@@ -1,12 +1,15 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:lucide_flutter/lucide_flutter.dart';
+import 'package:speech_to_text/speech_to_text.dart';
 
+import '../data/ai_client.dart';
+import '../data/haptics.dart';
 import '../data/task_repository.dart';
 import '../theme/app_motion.dart';
 import '../theme/sakura_theme.dart';
+import 'bloom_snackbar.dart';
 
 /// Modal bottom sheet behind the shell FAB: type a title, pick a folder
 /// and tag, and plant immediately into [TaskRepository] (optimistic +
@@ -47,6 +50,63 @@ class _QuickAddTaskSheetState extends State<QuickAddTaskSheet> {
   String _folder = _fallbackFolders.first;
   String _tag = _fallbackTags.first;
   bool _saving = false;
+  bool _aiLoading = false;
+  String? _aiHint;
+  DateTime? _dueAt;
+  String _priority = 'none';
+
+  /// Voice capture: dictation appends into the title field, then the
+  /// normal Auto-fill/Plant flow takes over. Unavailable platforms
+  /// (or denied mic) degrade to typing with one honest line.
+  final _speech = SpeechToText();
+  bool _listening = false;
+
+  Future<void> _toggleVoice() async {
+    if (_listening) {
+      await _speech.stop();
+      if (mounted) setState(() => _listening = false);
+      return;
+    }
+    AppHaptics.tap();
+    bool available = false;
+    try {
+      available = await _speech.initialize();
+    } catch (_) {
+      available = false;
+    }
+    if (!available || !mounted) {
+      if (mounted) {
+        showBloomSnackBar(context, 'Voice not available here — type instead.');
+      }
+      return;
+    }
+    setState(() => _listening = true);
+    _speech.statusListener = (status) {
+      if ((status == 'done' || status == 'notListening') &&
+          mounted &&
+          _listening) {
+        setState(() => _listening = false);
+      }
+    };
+    try {
+      await _speech.listen(
+        onResult: (result) {
+          if (!mounted) return;
+          setState(() {
+            _title.text = result.recognizedWords;
+            _title.selection =
+                TextSelection.collapsed(offset: _title.text.length);
+          });
+        },
+        listenOptions: SpeechListenOptions(
+          listenFor: const Duration(seconds: 30),
+          cancelOnError: true,
+        ),
+      );
+    } catch (_) {
+      if (mounted) setState(() => _listening = false);
+    }
+  }
 
   /// True while the post-plant 🌱 flourish plays; the sheet pops when the
   /// grow animation ends (ticker-driven, no bare timers).
@@ -55,6 +115,7 @@ class _QuickAddTaskSheetState extends State<QuickAddTaskSheet> {
 
   @override
   void dispose() {
+    _speech.cancel();
     _title.dispose();
     super.dispose();
   }
@@ -75,37 +136,69 @@ class _QuickAddTaskSheetState extends State<QuickAddTaskSheet> {
     return set.where((t) => t.trim().isNotEmpty).toList()..sort();
   }
 
+  /// AI auto-fill: parses "Report tomorrow 5pm #work" into folder/tag/due.
+  /// Server upgrades quality (Flash-Lite); offline falls back to the local
+  /// parser so the button never fails.
+  Future<void> _suggest() async {
+    final text = _title.text.trim();
+    if (text.isEmpty || _aiLoading) return;
+    setState(() {
+      _aiLoading = true;
+      _aiHint = null;
+    });
+    try {
+      final parsed = await AiClient().parse(text);
+      if (!mounted) return;
+      setState(() {
+        _title.text = parsed.title;
+        _title.selection = TextSelection.collapsed(offset: _title.text.length);
+        _tag = parsed.tag;
+        if (!_folders.contains(_tag) && _tags.contains(parsed.tag)) {
+          // tag list already includes it via repo merge; nothing extra.
+        }
+        _folder = _folders.contains(parsed.folder) ? parsed.folder : _folder;
+        _dueAt = parsed.dueAt;
+        _priority = parsed.priority;
+        _aiHint = [
+          if (parsed.dueAt != null)
+            'Due ${parsed.dueAt!.month}/${parsed.dueAt!.day}${parsed.dueAt!.hour != 0 ? ' ${parsed.dueAt!.hour}:${parsed.dueAt!.minute.toString().padLeft(2, '0')}' : ''}',
+          parsed.tag,
+          if (parsed.priority == 'high') 'high priority',
+          if (!parsed.fromAi) 'offline parse',
+        ].join(' · ');
+      });
+      AppHaptics.tap();
+    } finally {
+      if (mounted) setState(() => _aiLoading = false);
+    }
+  }
+
   void _plant() {
     final title = _title.text.trim();
     if (title.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Give your bloom a name first.')),
-      );
+      showBloomSnackBar(context, 'Give your bloom a name first.');
       return;
     }
     setState(() => _saving = true);
-    HapticFeedback.lightImpact();
+    AppHaptics.tap();
     // Optimistic: the repository inserts the task synchronously, so play
     // the 🌱 immediately instead of blocking on a network round-trip
     // (offline it would otherwise stall until the request times out).
-    unawaited(TaskRepository.instance
-        .createTask(title: title, folder: _folder, tag: _tag));
+    unawaited(TaskRepository.instance.createTask(
+        title: title, folder: _folder, tag: _tag, dueAt: _dueAt, priority: _priority));
     setState(() {
       _plantedTitle = title;
       _growing = true;
     });
-    HapticFeedback.mediumImpact();
+    AppHaptics.confirm();
   }
 
   /// Called when the 🌱 grow animation completes: dismiss + confirm.
   void _finishPlant() {
     if (!mounted) return;
     final navigator = Navigator.of(context);
-    final messenger = ScaffoldMessenger.of(context);
     navigator.pop();
-    messenger.showSnackBar(
-      SnackBar(content: Text('Planted "$_plantedTitle" 🌱')),
-    );
+    showBloomSnackBar(context, 'Planted "$_plantedTitle" 🌱');
   }
 
   Widget _sproutFlourish() {
@@ -219,6 +312,57 @@ class _QuickAddTaskSheetState extends State<QuickAddTaskSheet> {
                     borderRadius: BorderRadius.circular(14),
                     borderSide: BorderSide(color: SakuraColors.primary, width: 2),
                   ),
+                  suffixIcon: IconButton(
+                    icon: Icon(
+                      _listening ? LucideIcons.micOff : LucideIcons.mic,
+                      size: 18,
+                      color: _listening
+                          ? SakuraColors.primary
+                          : SakuraColors.inkFaint,
+                    ),
+                    tooltip: _listening
+                        ? 'Stop listening'
+                        : 'Dictate task',
+                    onPressed: _toggleVoice,
+                  ),
+                ),
+              ),
+              const SizedBox(height: 12),
+              GestureDetector(
+                onTap: _aiLoading ? null : _suggest,
+                behavior: HitTestBehavior.opaque,
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(
+                      LucideIcons.sparkles,
+                      size: 13,
+                      color: SakuraColors.primary,
+                    ),
+                    const SizedBox(width: 6),
+                    Text(
+                      _aiLoading ? 'Reading…' : 'Auto-fill with AI',
+                      style: TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w700,
+                        color: SakuraColors.primary,
+                      ),
+                    ),
+                    if (_aiHint != null) ...[
+                      const SizedBox(width: 8),
+                      Flexible(
+                        child: Text(
+                          _aiHint!,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            fontSize: 11,
+                            color: SakuraColors.inkSoft,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ],
                 ),
               ),
               const SizedBox(height: 16),

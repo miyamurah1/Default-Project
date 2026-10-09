@@ -60,4 +60,20 @@ void main() {
     expect(ics.contains('BEGIN:VEVENT'), isFalse);
     expect(datedCount([]), 0);
   });
+
+  test('plan blocks lay back-to-back from the start hour', () {
+    final ics = buildPlanBlocks(
+      const [
+        PlanBlock(id: 'a', title: 'Deep work', minutes: 50),
+        PlanBlock(id: 'b', title: 'Email triage', minutes: 25),
+      ],
+      day: DateTime(2026, 10, 7),
+      startHour: 14,
+    );
+    expect(ics, contains('UID:plan-a@dailybloom'));
+    expect(ics, contains('DURATION:PT50M'));
+    expect(ics, contains('SUMMARY:Deep work'));
+    // Second block starts after 50 min + 5 min breather (15:05 local).
+    expect(ics, contains('DURATION:PT25M'));
+  });
 }

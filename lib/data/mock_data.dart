@@ -73,6 +73,37 @@ class Task {
             : (j['focus_minutes'] as num).toInt(),
       );
 
+  /// Backup serialization: mirrors [fromJson] keys so an export
+  /// round-trips through [Task.fromJson] losslessly.
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'title': title,
+        'tag': tag,
+        'folder': folder,
+        'description': description,
+        'priority': priority,
+        'recurring': recurring,
+        'position': position,
+        'comments': comments,
+        'avatar_label': avatarLabel,
+        'status': status,
+        'due_at': dueAt?.toIso8601String(),
+        'created_at': createdAt?.toIso8601String(),
+        'completed_at': completedAt?.toIso8601String(),
+        'subtasks': subtasks
+            ?.map((s) => {
+                  'id': s.id,
+                  'task_id': s.taskId,
+                  'title': s.title,
+                  'done': s.done,
+                  'position': s.position,
+                  'created_at': s.startedAt.toIso8601String(),
+                  'completed_at': s.completedAt?.toIso8601String(),
+                })
+            .toList(),
+        'focus_minutes': focusMinutes,
+      };
+
   Task copyWith({
     String? title,
     String? tag,
@@ -109,12 +140,53 @@ class Task {
       );
 }
 
-/// Kanban-correct resume: reopening a done task puts it back IN
-/// PROGRESS (work resumes), not To-Do. Completing from anywhere lands
-/// in done. Single source so Home, Board, folders and detail never
-/// disagree about where a tap sends a task.
+/// Kanban-correct loop: completing from anywhere lands in done;
+/// reopening a done task returns it to the To-Do pile (never straight
+/// into In Progress, which would silently break the WIP limit).
+/// Single source so Home, Board, folders and detail never disagree
+/// about where a tap sends a task.
 String nextStatus(Task task) =>
-    task.status == 'done' ? 'in_progress' : 'done';
+    task.status == 'done' ? 'todo' : 'done';
+
+/// Day boundary helper: start of the task's local day count.
+DateTime _dayOnly(DateTime d) => DateTime(d.year, d.month, d.day);
+
+/// True when an open task's due date already passed.
+bool isOverdue(Task task, [DateTime? now]) {
+  final due = task.dueAt;
+  if (due == null || task.status == 'done') return false;
+  return due.isBefore(now ?? DateTime.now());
+}
+
+/// True when an open task is due today (any time today).
+bool isDueToday(Task task, [DateTime? now]) {
+  final due = task.dueAt;
+  if (due == null || task.status == 'done' || isOverdue(task, now)) {
+    return false;
+  }
+  final n = now ?? DateTime.now();
+  return _dayOnly(due.toLocal()).isAtSameMomentAs(_dayOnly(n));
+}
+
+/// To-Do float: overdue first, due-today next, everything else untouched.
+/// Stable — manual position order survives inside each band, so user
+/// ordering is never scrambled, only banded.
+List<Task> floatUrgent(List<Task> tasks, [DateTime? now]) {
+  final n = now ?? DateTime.now();
+  final over = <Task>[];
+  final today = <Task>[];
+  final rest = <Task>[];
+  for (final t in tasks) {
+    if (isOverdue(t, n)) {
+      over.add(t);
+    } else if (isDueToday(t, n)) {
+      today.add(t);
+    } else {
+      rest.add(t);
+    }
+  }
+  return [...over, ...today, ...rest];
+}
 
 /// Elapsed wall-clock time for one task: created -> done (or now while
 /// open). Null when the server never sent `created_at` (offline mocks).

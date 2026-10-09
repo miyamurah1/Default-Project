@@ -136,7 +136,10 @@ class ContributionHeatmap extends StatelessWidget {
                   Row(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: List.generate(weeks, (w) {
-                      return Container(
+                      // One repaint boundary per week column: a theme or
+                      // streak tick repaints 12 boxes, not 84 cells.
+                      return RepaintBoundary(
+                        child: Container(
                         margin: EdgeInsets.only(
                             right: w == weeks - 1 ? 0 : gap),
                         child: Column(
@@ -183,6 +186,7 @@ class ContributionHeatmap extends StatelessWidget {
                               ),
                             );
                           }),
+                        ),
                         ),
                       );
                     }),

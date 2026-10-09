@@ -1,11 +1,11 @@
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:intl/intl.dart';
 import 'package:lucide_flutter/lucide_flutter.dart';
 
 import '../data/api_client.dart';
 import '../data/energy_store.dart';
 import '../data/focus_controller.dart';
+import '../data/haptics.dart';
 import '../data/mock_data.dart';
 import '../theme/app_motion.dart';
 import '../theme/sakura_theme.dart';
@@ -15,14 +15,14 @@ import 'timeline_rail.dart';
 /// Sketch-style task card: main task on top, subtasks below, timer
 /// chip beside (bottom-right). Tapping the time opens the full timer.
 ///
-/// [task.subtasks]/[task.focusMinutes] come from
+/// [widget.task.subtasks]/[widget.task.focusMinutes] come from
 /// `GET /api/tasks?include=subtasks,focus`; when absent the card
 /// renders exactly like before (search results, mock mode).
 ///
-/// Tap areas are *siblings*, never nested: [onToggle] covers the text
-/// regions, [onOpen] is the chevron. (Nested tap detectors both fire in
+/// Tap areas are *siblings*, never nested: [widget.onToggle] covers the text
+/// regions, [widget.onOpen] is the chevron. (Nested tap detectors both fire in
 /// Flutter, so a chevron inside a toggle area would toggle AND open.)
-class TaskCard extends StatelessWidget {
+class TaskCard extends StatefulWidget {
   final Task task;
   final VoidCallback? onToggle;
   final VoidCallback? onOpen;
@@ -33,10 +33,10 @@ class TaskCard extends StatelessWidget {
   /// hosting list (it has the repository + context); null disables it.
   final VoidCallback? onLongPress;
 
-  /// Shared-element tag for the timer chip → [FocusTimerScreen] flight.
+  /// Shared-element tag for the timer chip â†’ [FocusTimerScreen] flight.
   /// Null disables the Hero (search rows, chipless cards). When set, the
-  /// pushing screen must pass the identical tag to the timer screen —
-  /// tags embed a per-screen prefix (`home-focus-…`) so the same task
+  /// pushing screen must pass the identical tag to the timer screen â€”
+  /// tags embed a per-screen prefix (`home-focus-â€¦`) so the same task
   /// rendered on two kept-alive tabs can never collide.
   final String? heroTag;
 
@@ -50,16 +50,26 @@ class TaskCard extends StatelessWidget {
       this.onLongPress,
       this.heroTag});
 
+  @override
+  State<TaskCard> createState() => _TaskCardState();
+}
+
+class _TaskCardState extends State<TaskCard> {
+  /// Subtask accordion: tasks with more than 2 subtasks render a compact
+  /// progress badge until tapped. Keeps list cards short; detail drill-in
+  /// stays one tap away via the title/chevron.
+  bool _subsExpanded = false;
+
   /// Main card body / title tap -> open the task detail. Completion has
   /// its own dedicated ring so the two targets never compete.
-  void _openTask() => onOpen?.call();
+  void _openTask() => widget.onOpen?.call();
 
-  /// Free-form subtask toggle — no confirm dialog and no lock-in.
+  /// Free-form subtask toggle â€” no confirm dialog and no lock-in.
   /// Completed -> a petal flourish + double-pulse (the [PetalBurst]
   /// wrapping the row owns those) plus a 3s UNDO snackbar. UNDO calls the
   /// parent handler directly so it never stacks a second snackbar.
   void _toggleSubWithUndo(BuildContext context, Subtask s) {
-    final handler = onToggleSub;
+    final handler = widget.onToggleSub;
     if (handler == null) return;
     final next = !s.done;
     handler(s, next);
@@ -67,7 +77,7 @@ class TaskCard extends StatelessWidget {
     messenger
       ?..hideCurrentSnackBar()
       ..showSnackBar(SnackBar(
-        content: Text(next ? 'Subtask done 🌸' : 'Subtask reopened'),
+        content: Text(next ? 'Subtask done ðŸŒ¸' : 'Subtask reopened'),
         duration: const Duration(seconds: 3),
         action: SnackBarAction(
           label: 'UNDO',
@@ -78,19 +88,19 @@ class TaskCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final overdue = task.dueAt != null &&
-        task.dueAt!.isBefore(DateTime.now()) &&
-        task.status != 'done';
-    final subs = task.subtasks;
+    final overdue = widget.task.dueAt != null &&
+        widget.task.dueAt!.isBefore(DateTime.now()) &&
+        widget.task.status != 'done';
+    final subs = widget.task.subtasks;
     return GestureDetector(
-      onLongPress: onLongPress,
+      onLongPress: widget.onLongPress,
       behavior: HitTestBehavior.opaque,
       child: Container(
       margin: const EdgeInsets.only(bottom: 14),
       padding: const EdgeInsets.all(18),
       decoration: SakuraTheme.flatCardDecoration(),
       // Tap targets are siblings, never nested: the title block below owns
-      // [onOpen]; the ring, subtasks and timer chip own theirs. (A
+      // [widget.onOpen]; the ring, subtasks and timer chip own theirs. (A
       // card-wide GestureDetector would share the arena with the subtask
       // detectors inside it.)
       child: Column(
@@ -106,7 +116,7 @@ class TaskCard extends StatelessWidget {
                     borderRadius: BorderRadius.circular(8),
                   ),
                   child: Text(
-                    task.tag.toUpperCase(),
+                    widget.task.tag.toUpperCase(),
                     style: TextStyle(
                       fontSize: 10,
                       letterSpacing: 1.6,
@@ -115,30 +125,30 @@ class TaskCard extends StatelessWidget {
                     ),
                   ),
                 ),
-                if (task.priority != 'none') ...[
+                if (widget.task.priority != 'none') ...[
                   const SizedBox(width: 6),
                   Container(
                     padding:
                         const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
                     decoration: BoxDecoration(
-                      color: task.priority == 'high'
+                      color: widget.task.priority == 'high'
                           ? SakuraColors.primary.withValues(alpha: 0.15)
                           : SakuraColors.tagBg,
                       borderRadius: BorderRadius.circular(6),
                     ),
                     child: Text(
-                      task.priority.toUpperCase(),
+                      widget.task.priority.toUpperCase(),
                       style: TextStyle(
                         fontSize: 9,
                         fontWeight: FontWeight.w800,
-                        color: task.priority == 'high'
+                        color: widget.task.priority == 'high'
                             ? SakuraColors.primary
                             : SakuraColors.inkSoft,
                       ),
                     ),
                   ),
                 ],
-                if (task.recurring != 'none') ...[
+                if (widget.task.recurring != 'none') ...[
                   const SizedBox(width: 6),
                   Icon(LucideIcons.repeat, size: 12, color: SakuraColors.inkSoft),
                 ],
@@ -146,7 +156,7 @@ class TaskCard extends StatelessWidget {
                   listenable: EnergyStore.instance,
                   builder: (context, _) {
                     final level =
-                        EnergyStore.instance.levelFor(task.id);
+                        EnergyStore.instance.levelFor(widget.task.id);
                     if (level == null) return const SizedBox.shrink();
                     return Padding(
                       padding: const EdgeInsets.only(left: 6),
@@ -186,7 +196,7 @@ class TaskCard extends StatelessWidget {
                 ),
                 const SizedBox(width: 4),
                 Text(
-                  '${task.comments}',
+                  '${widget.task.comments}',
                   style: TextStyle(
                     fontSize: 12,
                     color: SakuraColors.inkSoft,
@@ -200,7 +210,7 @@ class TaskCard extends StatelessWidget {
                   radius: 13,
                   backgroundColor: SakuraColors.primarySoft,
                   child: Text(
-                    task.avatarLabel.characters.first,
+                    widget.task.avatarLabel.characters.first,
                     style: TextStyle(
                       fontSize: 11,
                       fontWeight: FontWeight.w700,
@@ -215,21 +225,21 @@ class TaskCard extends StatelessWidget {
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               _CompletionRing(
-                done: task.status == 'done',
-                onTap: onToggle,
+                done: widget.task.status == 'done',
+                onTap: widget.onToggle,
               ),
               const SizedBox(width: 12),
               Expanded(
                 child: GestureDetector(
-                  // Title / description block owns "open" — ring, subtasks
+                  // Title / description block owns "open" â€” ring, subtasks
                   // and timer chip are siblings with their own detectors.
-                  onTap: onOpen == null ? null : _openTask,
+                  onTap: widget.onOpen == null ? null : _openTask,
                   behavior: HitTestBehavior.opaque,
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       Text(
-                        task.title,
+                        widget.task.title,
                         maxLines: 2,
                         overflow: TextOverflow.ellipsis,
                         style: TextStyle(
@@ -239,10 +249,10 @@ class TaskCard extends StatelessWidget {
                           color: SakuraColors.ink,
                         ),
                       ),
-                      if (task.description.isNotEmpty) ...[
+                      if (widget.task.description.isNotEmpty) ...[
                         const SizedBox(height: 4),
                         Text(
-                          task.description,
+                          widget.task.description,
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
                           style: TextStyle(
@@ -251,11 +261,35 @@ class TaskCard extends StatelessWidget {
                           ),
                         ),
                       ],
-                    if (task.dueAt != null) ...[
+                    if (widget.task.dueAt != null) ...[
                       const SizedBox(height: 6),
                       Row(
                         mainAxisSize: MainAxisSize.min,
                         children: [
+                          if (overdue || isDueToday(widget.task))
+                            Container(
+                              margin: const EdgeInsets.only(right: 6),
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 7, vertical: 2),
+                              decoration: BoxDecoration(
+                                color: overdue
+                                    ? SakuraColors.primary
+                                    : SakuraColors.primary
+                                        .withValues(alpha: 0.12),
+                                borderRadius: BorderRadius.circular(6),
+                              ),
+                              child: Text(
+                                overdue ? 'OVERDUE' : 'DUE TODAY',
+                                style: TextStyle(
+                                  fontSize: 9,
+                                  letterSpacing: 1.2,
+                                  fontWeight: FontWeight.w800,
+                                  color: overdue
+                                      ? Colors.white
+                                      : SakuraColors.primary,
+                                ),
+                              ),
+                            ),
                           Icon(
                             LucideIcons.calendarDays,
                             size: 12,
@@ -265,7 +299,7 @@ class TaskCard extends StatelessWidget {
                           ),
                           const SizedBox(width: 5),
                           Text(
-                            '${overdue ? 'Overdue · ' : 'Due '}${DateFormat('MMM d').format(task.dueAt!.toLocal())}',
+                            '${overdue ? 'Overdue Â· ' : 'Due '}${DateFormat('MMM d').format(widget.task.dueAt!.toLocal())}',
                             style: TextStyle(
                               fontSize: 11,
                               fontWeight: FontWeight.w700,
@@ -281,10 +315,10 @@ class TaskCard extends StatelessWidget {
                 ),
               ),
             ),
-              if (onOpen != null) ...[
+              if (widget.onOpen != null) ...[
                 const SizedBox(width: 8),
                 GestureDetector(
-                  onTap: onOpen,
+                  onTap: widget.onOpen,
                   behavior: HitTestBehavior.opaque,
                   child: Padding(
                     padding: const EdgeInsets.all(4),
@@ -301,78 +335,81 @@ class TaskCard extends StatelessWidget {
           // Same created -> done rail the detail screen draws, so a card
           // reads as a live slice of the task's timeline. Hidden when the
           // server sent no created_at (mock/offline rows).
-          if (task.createdAt != null) ...[
+          if (widget.task.createdAt != null) ...[
             const SizedBox(height: 10),
             TimelineRail(
-              created: task.createdAt,
-              completed: task.completedAt,
-              done: task.status == 'done',
+              created: widget.task.createdAt,
+              completed: widget.task.completedAt,
+              done: widget.task.status == 'done',
             ),
           ],
           if (subs != null && subs.isNotEmpty) ...[
             const SizedBox(height: 12),
             Container(height: 1, color: SakuraColors.cardBorder),
             const SizedBox(height: 6),
-            ...subs.map((s) => Semantics(
-                  button: true,
-                  label: s.done
-                      ? 'Reopen subtask ${s.title}'
-                      : 'Complete subtask ${s.title}',
-                  child: PetalBurst(
-                    // Free toggle: a finished subtask can be reopened.
-                    // Burst + double-pulse only fire when checking off.
-                    burstOnTap: !s.done,
-                    petalCount: 6,
-                    onTap: onToggleSub == null
-                        ? null
-                        : () => _toggleSubWithUndo(context, s),
-                    child: Padding(
-                      padding: const EdgeInsets.symmetric(vertical: 5),
-                      child: Row(children: [
-                        Container(
-                          width: 18,
-                          height: 18,
-                          decoration: BoxDecoration(
-                            color: s.done
-                                ? SakuraColors.primary
-                                : Colors.transparent,
-                            borderRadius: BorderRadius.circular(6),
-                            border: Border.all(
-                              color: s.done
-                                  ? SakuraColors.primary
-                                  : SakuraColors.inkFaint,
-                              width: 1.5,
-                            ),
-                          ),
-                          child: s.done
-                              ? const Icon(Icons.check,
-                                  size: 13, color: Colors.white)
-                              : null,
+            if (subs.length > 2 && !_subsExpanded)
+              // Compact accordion badge: progress at a glance, tap to
+              // expand the checklist inline. Keeps tall cards short.
+              GestureDetector(
+                onTap: () => setState(() => _subsExpanded = true),
+                behavior: HitTestBehavior.opaque,
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 5),
+                  child: Row(
+                    children: [
+                      Icon(
+                        LucideIcons.listChecks,
+                        size: 13,
+                        color: SakuraColors.primary,
+                      ),
+                      const SizedBox(width: 8),
+                      Text(
+                        '✓ ${subs.where((s) => s.done).length}/${subs.length} subtasks',
+                        style: TextStyle(
+                          fontSize: 12.5,
+                          fontWeight: FontWeight.w600,
+                          color: SakuraColors.inkSoft,
                         ),
-                        const SizedBox(width: 10),
-                        Expanded(
-                          child: Text(
-                            s.title,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: TextStyle(
-                              fontSize: 13,
-                              color: s.done
-                                  ? SakuraColors.inkFaint
-                                  : SakuraColors.ink,
-                              decoration: s.done
-                                  ? TextDecoration.lineThrough
-                                  : null,
-                            ),
+                      ),
+                      const Spacer(),
+                      Text(
+                        '[Show]',
+                        style: TextStyle(
+                          fontSize: 12,
+                          fontWeight: FontWeight.w800,
+                          color: SakuraColors.primary,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              )
+            else ...[
+              ...subs.map((s) => _subRow(context, s)),
+              if (subs.length > 2)
+                GestureDetector(
+                  onTap: () => setState(() => _subsExpanded = false),
+                  behavior: HitTestBehavior.opaque,
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 5),
+                    child: Row(
+                      children: [
+                        const Spacer(),
+                        Text(
+                          '[Hide]',
+                          style: TextStyle(
+                            fontSize: 12,
+                            fontWeight: FontWeight.w800,
+                            color: SakuraColors.primary,
                           ),
                         ),
                       ],
-                      ),
                     ),
                   ),
-                )),
+                ),
+            ],
           ],
-          if (task.focusMinutes != null || subs != null) ...[
+          if (widget.task.focusMinutes != null || subs != null) ...[
             const SizedBox(height: 8),
             Row(
               children: [
@@ -386,9 +423,9 @@ class TaskCard extends StatelessWidget {
                     ),
                   ),
                 const Spacer(),
-                if (onTimerTap != null)
+                if (widget.onTimerTap != null)
                   Builder(builder: (context) {
-                    final tag = heroTag;
+                    final tag = widget.heroTag;
                     if (tag == null) return _timerChip();
                     return Hero(tag: tag, child: _timerChip());
                   }),
@@ -401,9 +438,61 @@ class TaskCard extends StatelessWidget {
     );
   }
 
+  /// One checklist row. Extracted so the accordion badge and the
+  /// expanded list share it.
+  Widget _subRow(BuildContext context, Subtask s) {
+    return Semantics(
+      button: true,
+      label: s.done ? 'Reopen subtask ${s.title}' : 'Complete subtask ${s.title}',
+      child: PetalBurst(
+        // Free toggle: a finished subtask can be reopened.
+        // Burst + double-pulse only fire when checking off.
+        burstOnTap: !s.done,
+        petalCount: 6,
+        onTap: widget.onToggleSub == null
+            ? null
+            : () => _toggleSubWithUndo(context, s),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(vertical: 5),
+          child: Row(children: [
+            Container(
+              width: 18,
+              height: 18,
+              decoration: BoxDecoration(
+                color: s.done ? SakuraColors.primary : Colors.transparent,
+                borderRadius: BorderRadius.circular(6),
+                border: Border.all(
+                  color:
+                      s.done ? SakuraColors.primary : SakuraColors.inkFaint,
+                  width: 1.5,
+                ),
+              ),
+              child: s.done
+                  ? const Icon(Icons.check, size: 13, color: Colors.white)
+                  : null,
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Text(
+                s.title,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  fontSize: 13,
+                  color: s.done ? SakuraColors.inkFaint : SakuraColors.ink,
+                  decoration: s.done ? TextDecoration.lineThrough : null,
+                ),
+              ),
+            ),
+          ]),
+        ),
+      ),
+    );
+  }
+
   /// Timer chip beside the card: total focused time as HH:MM (your
   /// sketch's "05:50"), live orange countdown while a session runs.
-  /// Tap → full timer screen.
+  /// Tap â†’ full timer screen.
   Widget _timerChip() {
     return ListenableBuilder(
       // Structural only (session started/finished on some task). The
@@ -413,7 +502,7 @@ class TaskCard extends StatelessWidget {
       builder: (context, _) {
         final fc = FocusController.instance;
         final live =
-            fc.active && fc.task?.id == task.id;
+            fc.active && fc.task?.id == widget.task.id;
         final label = live
             ? ValueListenableBuilder<int>(
                 valueListenable: fc.tickListenable,
@@ -428,7 +517,7 @@ class TaskCard extends StatelessWidget {
                           color: Color(0xFFFF9800),
                         )),
               )
-            : Text(_hhmm(task.focusMinutes ?? 0),
+            : Text(_hhmm(widget.task.focusMinutes ?? 0),
                 style: TextStyle(
                   fontSize: 12,
                   fontWeight: FontWeight.w800,
@@ -439,7 +528,7 @@ class TaskCard extends StatelessWidget {
           button: true,
           label: live ? 'Open running focus timer' : 'Start focus timer',
           child: GestureDetector(
-            onTap: onTimerTap,
+            onTap: widget.onTimerTap,
             behavior: HitTestBehavior.opaque,
             child: Container(
               padding:
@@ -503,7 +592,7 @@ class _CompletionRing extends StatelessWidget {
         onTap: onTap == null
             ? null
             : () {
-                HapticFeedback.lightImpact();
+                AppHaptics.tap();
                 onTap!();
               },
         child: AnimatedContainer(

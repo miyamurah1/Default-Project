@@ -10,7 +10,11 @@ import 'package:share_plus/share_plus.dart';
 import '../data/api_client.dart';
 import '../data/auth_store.dart';
 import '../data/calendar_export.dart';
+import '../data/crash_reports.dart';
+import '../data/habit_store.dart';
+import '../data/mock_data.dart';
 import '../data/reminders.dart';
+import '../data/task_repository.dart';
 import '../game/game.dart';
 import '../theme/sakura_theme.dart';
 import '../widgets/bloom_dialog.dart';
@@ -26,8 +30,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
   bool _deleting = false;
   bool _exporting = false;
   bool _exportingIcs = false;
+  bool _backupBusy = false;
   bool _reminderOn = false;
   bool _reminderBusy = false;
+  bool _crashOn = true;
 
   @override
   void initState() {
@@ -38,6 +44,21 @@ class _SettingsScreenState extends State<SettingsScreen> {
             () => _reminderOn = ReminderService.instance.enabled);
       }
     });
+    CrashReports.enabled().then((v) {
+      if (mounted) setState(() => _crashOn = v);
+    });
+  }
+
+  Future<void> _toggleCrash(bool value) async {
+    await CrashReports.setEnabled(value);
+    if (!mounted) return;
+    setState(() => _crashOn = value);
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+          content: Text(value
+              ? 'Crash reports on — thanks for helping fix bugs.'
+              : 'Crash reports off — takes effect on restart.')),
+    );
   }
 
   Future<void> _toggleReminder(bool value) async {
@@ -66,6 +87,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   Future<void> _logout() async {
     ThemeStore.instance.resetToDefault();
+    // Drop this account's due alarms: they reference tasks that no
+    // longer belong on this device.
+    await ReminderService.instance.cancelAllTaskReminders();
     await AuthStore.instance.logout();
     // AuthGate swaps to login; this tree is discarded.
   }
@@ -93,6 +117,223 @@ class _SettingsScreenState extends State<SettingsScreen> {
       );
     } finally {
       if (mounted) setState(() => _exporting = false);
+    }
+  }
+
+  Future<void> _exportBackup() async {    setState(() => _backupBusy = true);
+    try {
+      final game = GamificationStateNotifier.instance;
+      final backup = {
+        'version': 1,
+        'exportedAt': DateTime.now().toIso8601String(),
+        'tasks': [
+          for (final t in TaskRepository.instance.tasks) t.toJson()
+        ],
+        'goals': [for (final g in HabitStore.instance.goals) g.toJson()],
+        'habits': [
+          for (final h in HabitStore.instance.habits) h.toJson()
+        ],
+        'stats': {
+          'totalXp': game.totalXp,
+          'tokens': game.tokens,
+          'streak': game.streak,
+          'level': game.level,
+        },
+      };
+      if (kIsWeb) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+              content: Text(
+                  'Backup files need the mobile or desktop app.')),
+        );
+        return;
+      }
+      final file = await File(
+              '${Directory.systemTemp.path}/daily-bloom-backup.json')
+          .writeAsString(jsonEncode(backup));
+      await SharePlus.instance.share(
+        ShareParams(
+          files: [XFile(file.path, mimeType: 'application/json')],
+          text: 'Daily Bloom Backup',
+        ),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Backup export failed.')),
+      );
+    } finally {
+      if (mounted) setState(() => _backupBusy = false);
+    }
+  }
+
+  /// Import a backup: paste JSON (exported above) into the dialog, confirm,
+  /// then merge. Existing ids are skipped (no duplicates); game stats only
+  /// ever move up, never down.
+  Future<void> _importBackup() async {
+    final pasted = await showDialog<String>(
+      context: context,
+      builder: (ctx) {
+        final ctrl = TextEditingController();
+        return BloomDialog(
+          title: 'Import backup',
+          confirmLabel: 'Review',
+          onConfirm: () => Navigator.of(ctx).pop(ctrl.text.trim()),
+          body: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                'Paste a Daily Bloom backup JSON below. Duplicates are skipped; game stats only move up.',
+                style: TextStyle(
+                    fontSize: 12.5,
+                    height: 1.5,
+                    color: SakuraColors.inkSoft),
+              ),
+              const SizedBox(height: 10),
+              TextField(
+                controller: ctrl,
+                minLines: 4,
+                maxLines: 8,
+                maxLength: 500000,
+                style: TextStyle(color: SakuraColors.ink, fontSize: 12),
+                decoration: BloomDialog.fieldDecoration(
+                    '{"version": 1, "tasks": […]}'),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+    if (pasted == null || pasted.isEmpty || !mounted) return;
+    Map<String, dynamic> backup;
+    try {
+      final decoded = jsonDecode(pasted);
+      if (decoded is! Map<String, dynamic>) throw const FormatException();
+      backup = decoded;
+    } catch (_) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('That is not valid backup JSON.')),
+      );
+      return;
+    }
+    final yes = await showBloomConfirm(
+      context,
+      title: 'Merge this backup?',
+      message:
+          'New tasks and habits are added; anything already here is skipped. This cannot be undone in bulk.',
+      cancelLabel: 'Cancel',
+      confirmLabel: 'Merge',
+    );
+    if (!yes || !mounted) return;
+    setState(() => _backupBusy = true);
+    try {
+      var tasksAdded = 0;
+      var tasksSkipped = 0;
+      var habitsAdded = 0;
+      var habitsSkipped = 0;
+      final repo = TaskRepository.instance;
+      final existingTasks = repo.tasks.map((t) => t.id).toSet();
+      final rawTasks = backup['tasks'];
+      if (rawTasks is List) {
+        for (final raw in rawTasks) {
+          if (raw is! Map<String, dynamic>) continue;
+          Task task;
+          try {
+            task = Task.fromJson(raw);
+          } catch (_) {
+            continue;
+          }
+          if (task.id.isEmpty || existingTasks.contains(task.id)) {
+            tasksSkipped++;
+            continue;
+          }
+          final created = await repo.createTask(
+            title: task.title,
+            folder: task.folder,
+            tag: task.tag,
+            description: task.description,
+            priority: task.priority,
+            recurring: task.recurring,
+            dueAt: task.dueAt,
+          );
+          final subs = task.subtasks ?? const [];
+          for (final s in subs) {
+            final sub = await repo.createSubtask(created.id, s.title);
+            if (s.done) await repo.setSubtaskDone(sub.id, true);
+          }
+          if (task.status != 'todo') {
+            await repo.moveTask(created.id, task.status);
+          }
+          tasksAdded++;
+        }
+      }
+      // Goals first (habits reference them); remap old goal ids to new.
+      final store = HabitStore.instance;
+      final existingHabits = store.habits.map((h) => h.id).toSet();
+      final goalMap = <String, String>{};
+      final rawGoals = backup['goals'];
+      if (rawGoals is List) {
+        for (final raw in rawGoals) {
+          if (raw is! Map<String, dynamic>) continue;
+          HabitGoal goal;
+          try {
+            goal = HabitGoal.fromJson(raw);
+          } catch (_) {
+            continue;
+          }
+          if (goal.id.isEmpty) continue;
+          final created = await store.addGoal(
+            name: goal.name,
+            intention: goal.intention,
+            iconIndex: goal.iconIndex,
+            accentIndex: goal.accentIndex,
+          );
+          goalMap[goal.id] = created.id;
+        }
+      }
+      final rawHabits = backup['habits'];
+      if (rawHabits is List) {
+        for (final raw in rawHabits) {
+          if (raw is! Map<String, dynamic>) continue;
+          Habit habit;
+          try {
+            habit = Habit.fromJson(raw);
+          } catch (_) {
+            continue;
+          }
+          if (habit.id.isEmpty || existingHabits.contains(habit.id)) {
+            habitsSkipped++;
+            continue;
+          }
+          final goalId =
+              habit.goalId == null ? null : goalMap[habit.goalId];
+          await store.restoreHabit(habit.copyWith(goalId: () => goalId));
+          habitsAdded++;
+        }
+      }
+      // Stats only move up — a restore never erases progress.
+      final game = GamificationStateNotifier.instance;
+      final stats = backup['stats'];
+      if (stats is Map<String, dynamic>) {
+        final xp = (stats['totalXp'] as num?)?.toInt() ?? 0;
+        final tokens = (stats['tokens'] as num?)?.toInt() ?? 0;
+        final streak = (stats['streak'] as num?)?.toInt() ?? 0;
+        if (xp > game.totalXp) game.addXp(xp - game.totalXp);
+        if (tokens > game.tokens) game.addTokens(tokens - game.tokens);
+        if (streak > game.streak) game.setStreak(streak);
+      }
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+            content: Text(
+                'Restored $tasksAdded tasks, $habitsAdded habits'
+                '${tasksSkipped + habitsSkipped > 0 ? ' (${tasksSkipped + habitsSkipped} duplicates skipped)' : ''}.')),
+      );
+    } finally {
+      if (mounted) setState(() => _backupBusy = false);
     }
   }
 
@@ -364,6 +605,32 @@ class _SettingsScreenState extends State<SettingsScreen> {
                       style: TextStyle(
                           fontWeight: FontWeight.w700)),
                 ),
+                const SizedBox(height: 12),
+                OutlinedButton.icon(
+                  style: _actionStyle,
+                  onPressed: _backupBusy ? null : _exportBackup,
+                  icon: _backupBusy
+                      ? const SizedBox(
+                          height: 15,
+                          width: 15,
+                          child: CircularProgressIndicator(
+                              strokeWidth: 2))
+                      : const Icon(LucideIcons.databaseBackup,
+                          size: 15),
+                  label: const Text('Export all data (JSON)',
+                      style: TextStyle(
+                          fontWeight: FontWeight.w700)),
+                ),
+                const SizedBox(height: 12),
+                OutlinedButton.icon(
+                  style: _actionStyle,
+                  onPressed: _backupBusy ? null : _importBackup,
+                  icon: const Icon(LucideIcons.databaseZap,
+                      size: 15),
+                  label: const Text('Import backup (JSON)',
+                      style: TextStyle(
+                          fontWeight: FontWeight.w700)),
+                ),
               ],
             ),
           ),
@@ -407,6 +674,50 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   value: _reminderOn,
                   onChanged:
                       _reminderBusy ? null : (v) => _toggleReminder(v),
+                  activeThumbColor: SakuraColors.primary,
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 14),
+          Container(
+            padding: const EdgeInsets.all(20),
+            decoration: SakuraTheme.cardDecoration(),
+            child: Row(
+              children: [
+                Container(
+                  padding: const EdgeInsets.all(8),
+                  decoration: BoxDecoration(
+                    color: SakuraColors.primary.withValues(alpha: 0.1),
+                    shape: BoxShape.circle,
+                  ),
+                  child: Icon(LucideIcons.bug,
+                      size: 15, color: SakuraColors.primary),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'Crash reports',
+                        style: TextStyle(
+                            fontSize: 14,
+                            fontWeight: FontWeight.w700,
+                            color: SakuraColors.ink),
+                      ),
+                      const SizedBox(height: 2),
+                      Text(
+                        'Anonymous crash logs only — off switch takes effect on restart.',
+                        style: TextStyle(
+                            fontSize: 12, color: SakuraColors.inkSoft),
+                      ),
+                    ],
+                  ),
+                ),
+                Switch(
+                  value: _crashOn,
+                  onChanged: (v) => _toggleCrash(v),
                   activeThumbColor: SakuraColors.primary,
                 ),
               ],

@@ -1,11 +1,11 @@
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:lucide_flutter/lucide_flutter.dart';
 
 import '../theme/app_motion.dart';
 import '../theme/sakura_theme.dart';
+import '../data/haptics.dart';
 import 'bloom_engine.dart';
 import 'bloom_game_colors.dart';
 
@@ -576,7 +576,7 @@ class _BinaryHabitCardState extends State<BinaryHabitCard> {
           child: InkWell(
             borderRadius: BorderRadius.circular(20),
             onTap: () {
-              HapticFeedback.lightImpact();
+              AppHaptics.tap();
               _fire(!on);
             },
             splashColor: accent.withValues(alpha: 0.08),
@@ -815,7 +815,7 @@ class _MeasurableHabitCardState extends State<MeasurableHabitCard> {
   }
 
   void _increment() {
-    HapticFeedback.lightImpact();
+    AppHaptics.tap();
     setState(() => _pulsed = true);
     Future.delayed(
       AppMotion.tap,

@@ -1,11 +1,12 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:lucide_flutter/lucide_flutter.dart';
 
+import '../data/ai_client.dart';
 import '../data/api_client.dart';
 import '../data/auth_store.dart';
+import '../data/haptics.dart';
 import '../data/mock_data.dart';
 import '../data/task_repository.dart';
 import '../theme/app_motion.dart';
@@ -33,6 +34,11 @@ class _SearchScreenState extends State<SearchScreen> {
   bool _searching = false;
   bool _touched = false;
   _SearchFilter _activeFilter = _SearchFilter.all;
+
+  /// Ask Bloom answer for the current query (server Flash-Lite,
+  /// local keyword scoring offline). Cleared whenever the query resets.
+  AiAnswer? _answer;
+  bool _asking = false;
 
   @override
   void initState() {
@@ -78,6 +84,8 @@ class _SearchScreenState extends State<SearchScreen> {
         _hits = [];
         _searching = false;
         _touched = false;
+        _answer = null;
+        _asking = false;
       });
       return;
     }
@@ -112,8 +120,26 @@ class _SearchScreenState extends State<SearchScreen> {
     });
   }
 
+  /// Ask Bloom about the current query. Answers from the server when
+  /// online, local keyword scoring offline. Matches open their task.
+  Future<void> _ask() async {
+    final query = _ctrl.text.trim();
+    if (query.length < 2 || _asking) return;
+    setState(() {
+      _asking = true;
+      _answer = null;
+    });
+    AppHaptics.tap();
+    final answer =
+        await AiClient().ask(query, TaskRepository.instance.tasks);    if (!mounted) return;
+    setState(() {
+      _answer = answer;
+      _asking = false;
+    });
+  }
+
   Future<void> _toggleTask(Task t) async {
-    HapticFeedback.lightImpact();
+    AppHaptics.tap();
     final next = t.status == 'done' ? 'todo' : 'done';
     await TaskRepository.instance.moveTask(t.id, next);
     if (!mounted) return;
@@ -293,6 +319,114 @@ class _SearchScreenState extends State<SearchScreen> {
                     _SearchFilter.highPriority,
                     'High Priority (${_hits.where((t) => t.priority == 'high').length})',
                   ),
+                ],
+              ),
+            ),
+          if (_touched)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(20, 0, 20, 10),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  GestureDetector(
+                    onTap: _asking ? null : _ask,
+                    behavior: HitTestBehavior.opaque,
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(
+                          LucideIcons.sparkles,
+                          size: 13,
+                          color: SakuraColors.primary,
+                        ),
+                        const SizedBox(width: 6),
+                        Text(
+                          _asking
+                              ? 'Asking Bloom…'
+                              : 'Ask Bloom about “${_ctrl.text.trim().length > 30 ? '${_ctrl.text.trim().substring(0, 30)}…' : _ctrl.text.trim()}”',
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            fontSize: 12,
+                            fontWeight: FontWeight.w700,
+                            color: SakuraColors.primary,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  if (_answer != null) ...[
+                    const SizedBox(height: 8),
+                    Container(
+                      padding: const EdgeInsets.all(14),
+                      decoration: BoxDecoration(
+                        color: SakuraColors.primary.withValues(alpha: 0.07),
+                        borderRadius: BorderRadius.circular(14),
+                        border:
+                            Border.all(color: SakuraColors.cardBorder),
+                      ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Text(
+                            _answer!.text,
+                            style: TextStyle(
+                              fontSize: 13,
+                              height: 1.45,
+                              color: SakuraColors.ink,
+                            ),
+                          ),
+                          for (final id in _answer!.ids)
+                            Builder(builder: (context) {
+                              Task? hit;
+                              try {
+                                hit = TaskRepository.instance.tasks
+                                    .firstWhere((t) => t.id == id);
+                              } catch (_) {
+                                hit = null;
+                              }
+                              if (hit == null) {
+                                return const SizedBox.shrink();
+                              }
+                              final h = hit;
+                              return GestureDetector(
+                                onTap: () => _open(h),
+                                behavior: HitTestBehavior.opaque,
+                                child: Padding(
+                                  padding:
+                                      const EdgeInsets.only(top: 6),
+                                  child: Row(
+                                    children: [
+                                      Icon(
+                                        LucideIcons.arrowRight,
+                                        size: 12,
+                                        color: SakuraColors.primary,
+                                      ),
+                                      const SizedBox(width: 6),
+                                      Expanded(
+                                        child: Text(
+                                          h.title,
+                                          maxLines: 1,
+                                          overflow:
+                                              TextOverflow.ellipsis,
+                                          style: TextStyle(
+                                            fontSize: 12.5,
+                                            fontWeight: FontWeight.w600,
+                                            color: SakuraColors.primary,
+                                          ),
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              );
+                            }),
+                        ],
+                      ),
+                    ),
+                  ],
                 ],
               ),
             ),

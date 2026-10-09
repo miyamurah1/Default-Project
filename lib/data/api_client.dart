@@ -501,8 +501,10 @@ class BloomApi {
 
   // --- Phase B: focus timer ---
 
+  /// Start a focus session, optionally attached to a task. A null
+  /// [taskId] starts a "Free Deep Work" session (server migration 017).
   Future<FocusSession> startFocus({
-    required String taskId,
+    String? taskId,
     required int minutes,
     required String mode,
   }) async {
@@ -510,8 +512,11 @@ class BloomApi {
     final res = await _client
         .post(uri,
             headers: await _headers,
-            body: jsonEncode(
-                {'task_id': taskId, 'minutes': minutes, 'mode': mode}))
+            body: jsonEncode({
+              if (taskId != null) 'task_id': taskId,
+              'minutes': minutes,
+              'mode': mode
+            }))
         .timeout(timeout);
     if (res.statusCode == 401) {
       AuthStore.instance.logout();
@@ -855,10 +860,11 @@ class HeatDay {
       );
 }
 
-/// One timer run on a task: focus or break.
+/// One timer run — attached to a task, or free ("Free Deep Work" when
+/// [taskId] is null; server migration 017).
 class FocusSession {
   final String id;
-  final String taskId;
+  final String? taskId;
   final String mode; // focus | break
   final int plannedMinutes;
   final int actualMinutes;
@@ -867,7 +873,7 @@ class FocusSession {
 
   const FocusSession({
     required this.id,
-    required this.taskId,
+    this.taskId,
     this.mode = 'focus',
     this.plannedMinutes = 25,
     this.actualMinutes = 0,
@@ -879,7 +885,7 @@ class FocusSession {
     final raw = j['completed'];
     return FocusSession(
       id: '${j['id']}',
-      taskId: '${j['task_id']}',
+      taskId: j['task_id'] == null ? null : '${j['task_id']}',
       mode: '${j['mode'] ?? 'focus'}',
       plannedMinutes: (j['planned_minutes'] as num?)?.toInt() ?? 25,
       actualMinutes: (j['actual_minutes'] as num?)?.toInt() ?? 0,

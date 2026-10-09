@@ -122,14 +122,8 @@ class _FocusTimerScreenState extends State<FocusTimerScreen> {
 
   Future<void> _setTimer() async {
     final task = _task;
-    if (task == null) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Open a task to attach the timer to.')),
-      );
-      return;
-    }
     try {
-      final sub = _selectedSub;
+      final sub = task == null ? null : _selectedSub;
       await FocusController.instance.start(
         task: task,
         minutes: _presetMin,
@@ -279,7 +273,16 @@ class _FocusTimerScreenState extends State<FocusTimerScreen> {
                                             color: Colors.white60,
                                             fontSize: 13),
                                       ),
-                                    ),
+                                    )
+                            else
+                              const Text(
+                                'Free Deep Work — no task attached',
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: TextStyle(
+                                    color: Colors.white60,
+                                    fontSize: 13),
+                              ),
                           ],
                         ),
                       ),

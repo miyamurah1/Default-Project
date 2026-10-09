@@ -15,7 +15,7 @@ class _FakeFocusApi extends BloomApi {
 
   @override
   Future<FocusSession> startFocus({
-    required String taskId,
+    String? taskId,
     required int minutes,
     required String mode,
   }) async {
@@ -108,6 +108,16 @@ void main() {
     await fc.abandon();
   });
 
+  test('free focus starts without a task and finishes cleanly', () async {
+    await fc.start(minutes: 10, mode: 'focus');
+    expect(fc.active, isTrue);
+    expect(fc.task, isNull);
+    expect(api.starts, 1);
+    await fc.finish();
+    expect(fc.active, isFalse);
+    expect(fc.consumeNotice(), contains('Focused'));
+  });
+
   test('finish posts the session and emits a focus notice', () async {
     await fc.start(task: task, minutes: 25, mode: 'focus');
     final before = api.finishes;
@@ -126,10 +136,14 @@ void main() {
     expect(fc.consumeNotice(), contains('Could not save'));
   });
 
-  test('abandon posts and explains the discard', () async {
+  test('abandon banks partial minutes instead of discarding', () async {
     await fc.start(task: task, minutes: 10, mode: 'break');
     await fc.abandon();
     expect(fc.active, isFalse);
-    expect(fc.consumeNotice(), contains('discarded'));
+    final note = fc.consumeNotice() ?? '';
+    // Immediate abandon banks nothing; either way the copy credits
+    // the user instead of saying "discarded".
+    expect(note, isNot(contains('discarded')));
+    expect(note, anyOf([contains('banked'), contains('nothing lost')]));
   });
 }

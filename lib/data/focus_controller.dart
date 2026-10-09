@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart';
 import 'api_client.dart';
 import 'auth_store.dart';
 import 'mock_data.dart';
+import 'reminders.dart';
 import 'session_sound.dart';
 
 /// mm:ss for the countdown pills.
@@ -73,7 +74,7 @@ class FocusController extends ChangeNotifier {
   }
 
   Future<void> start({
-    required Task task,
+    Task? task,
     required int minutes,
     required String mode,
     String? subtaskTitle,
@@ -83,7 +84,7 @@ class FocusController extends ChangeNotifier {
     notifyListeners();
     try {
       final s = await _api.startFocus(
-          taskId: task.id, minutes: minutes, mode: mode);
+          taskId: task?.id, minutes: minutes, mode: mode);
       sessionId = s.id;
       this.task = task;
       this.subtaskTitle = subtaskTitle?.trim().isEmpty == true
@@ -94,6 +95,12 @@ class FocusController extends ChangeNotifier {
       remaining = Duration(minutes: minutes);
       paused = false;
       _tick();
+      // Background alarm: the in-memory ticker dies with the app, so the
+      // OS fires the completion notice even when locked/backgrounded.
+      unawaited(ReminderService.instance.scheduleFocusTimerNotification(
+        duration: remaining,
+        label: task?.title ?? 'Free Deep Work',
+      ));
     } finally {
       busy = false;
       notifyListeners();
@@ -121,6 +128,8 @@ class FocusController extends ChangeNotifier {
     if (!active || paused) return;
     _ticker?.cancel();
     paused = true;
+    // A paused timer must not fire: the alarm would lie.
+    unawaited(ReminderService.instance.cancelFocusTimerNotification());
     notifyListeners();
   }
 
@@ -128,6 +137,10 @@ class FocusController extends ChangeNotifier {
     if (!active || !paused) return;
     paused = false;
     _tick();
+    unawaited(ReminderService.instance.scheduleFocusTimerNotification(
+      duration: remaining,
+      label: task?.title ?? 'Free Deep Work',
+    ));
     notifyListeners();
   }
 
@@ -141,7 +154,14 @@ class FocusController extends ChangeNotifier {
         : (next > const Duration(hours: 8)
             ? const Duration(hours: 8)
             : next);
-    if (!paused) _tick();
+    if (!paused) {
+      _tick();
+      // Keep the alarm honest with the new deadline.
+      unawaited(ReminderService.instance.scheduleFocusTimerNotification(
+        duration: remaining,
+        label: task?.title ?? 'Free Deep Work',
+      ));
+    }
     notifyListeners();
   }
 
@@ -155,9 +175,11 @@ class FocusController extends ChangeNotifier {
     final id = sessionId;
     if (id == null) return;
     _ticker?.cancel();
+    // Session over (early or on time): any pending alarm is now stale.
+    unawaited(ReminderService.instance.cancelFocusTimerNotification());
     final actual = _elapsedMinutes();
     final wasFocus = mode == 'focus';
-    final title = task?.title ?? 'task';
+    final title = task?.title ?? 'Free Focus';
     final sub = subtaskTitle;
     _clear();
     // Chime + haptics the moment a session completes — natural expiry
@@ -186,12 +208,17 @@ class FocusController extends ChangeNotifier {
     final id = sessionId;
     if (id == null) return;
     _ticker?.cancel();
+    unawaited(ReminderService.instance.cancelFocusTimerNotification());
     final actual = _elapsedMinutes();
     _clear();
     try {
       await _api.finishFocus(
           id: id, completed: false, actualMinutes: actual);
-      notice = 'Session discarded ($actual min kept in history).';
+      // Interrupted sessions still count: partial minutes already feed
+      // the focus totals, so say what was banked, not what was lost.
+      notice = actual > 0
+          ? '$actual real minute${actual == 1 ? '' : 's'} banked — the rest can wait.'
+          : 'Paused in time — nothing lost, pick it back up anytime.';
     } catch (e) {
       if (e is! AuthExpiredException) {
         notice = 'Could not save session: $e';

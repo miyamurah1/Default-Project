@@ -9,11 +9,20 @@ import '../theme/app_motion.dart';
 /// Wrap headers, cards, and list rows. Delete the wrapper to revert.
 /// Set [animate] false for rows past the first screenful — they appear
 /// instantly instead of stacking timers (mobile jank fix).
+///
+/// Pass [onceKey] for list rows: the first mount with that key animates,
+/// every later mount in the session renders instantly. Tab switches,
+/// rebuilds, and scroll-recycling then feel instant while first paint
+/// keeps its cascade. New items (new keys) still delight once.
 class Entrance extends StatefulWidget {
   final Widget child;
   final int delayMs;
   final double rise;
   final bool animate;
+  final String? onceKey;
+
+  /// Keys that already played their entrance this session.
+  static final Set<String> _playedOnce = {};
 
   const Entrance({
     super.key,
@@ -21,7 +30,12 @@ class Entrance extends StatefulWidget {
     this.delayMs = 0,
     this.rise = AppMotion.entranceRise,
     this.animate = true,
+    this.onceKey,
   });
+
+  /// Test-only: clear the session-once memory.
+  @visibleForTesting
+  static void debugResetOnceKeys() => _playedOnce.clear();
 
   @override
   State<Entrance> createState() => _EntranceState();
@@ -40,12 +54,22 @@ class _EntranceState extends State<Entrance> {
       _resolved = true;
       return;
     }
-    if (widget.delayMs <= 0) {
+    // Session-once rows replay as instant: the cascade is a first-paint
+    // delight, not a every-rebuild tax.
+    final once = widget.onceKey;
+    if (once != null && Entrance._playedOnce.contains(once)) {
       _shown = true;
       _resolved = true;
       return;
     }
+    if (widget.delayMs <= 0) {
+      _shown = true;
+      _resolved = true;
+      if (once != null) Entrance._playedOnce.add(once);
+      return;
+    }
     _timer = Timer(Duration(milliseconds: widget.delayMs), () {
+      if (once != null) Entrance._playedOnce.add(once);
       if (mounted) setState(() => _shown = true);
     });
   }

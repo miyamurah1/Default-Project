@@ -142,7 +142,22 @@ class AuthStore extends ChangeNotifier {
             _user = await _syncProfile(firebaseUser);
             await _persistUser();
           } catch (_) {
-            // Use cached profile if network is unavailable.
+            // Offline cold start: keep the cached profile when it belongs
+            // to this Firebase user; otherwise synthesize a fallback from
+            // the on-device Firebase identity so AuthGate lets the user
+            // into their cached data instead of bouncing to Login.
+            final cached = _user;
+            final sameUser = cached != null &&
+                cached.email.toLowerCase() ==
+                    (firebaseUser.email ?? '').toLowerCase();
+            if (!sameUser) {
+              _user = AuthUser(
+                id: 'offline-${firebaseUser.uid}',
+                email: firebaseUser.email ?? '',
+                displayName: firebaseUser.displayName ?? '',
+              );
+              await _persistUser();
+            }
           }
           _ready = true;
           notifyListeners();
